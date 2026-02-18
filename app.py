@@ -1,23 +1,21 @@
-import time
 import datetime as dt
 
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 # -----------------------------
 # CONFIG
 # -----------------------------
 st.set_page_config(page_title="TSX Intraday Scanner", layout="wide")
 
-# Example TSX tickers (you can extend this list)
 DEFAULT_TICKERS = [
     "RY.TO", "TD.TO", "BNS.TO", "ENB.TO", "SHOP.TO",
     "CNQ.TO", "SU.TO", "BCE.TO", "TRP.TO", "MFC.TO"
 ]
 
-MARKET_OPEN = dt.time(9, 30)
 OPENING_RANGE_MINUTES = 15
 
 # -----------------------------
@@ -47,11 +45,13 @@ def compute_emas(df, spans=(9, 20)):
     return df
 
 def get_opening_range(df, opening_minutes=15):
-    # Filter first N minutes after market open
     df_local = df.copy()
-    df_local["Time"] = df_local.index.tz_convert("America/Toronto").time
-    first_bar_time = min(df_local["Time"])
-    # Use first 15 minutes from first bar
+    # Assume index is timezone-aware; if not, skip tz_convert
+    try:
+        df_local["Time"] = df_local.index.tz_convert("America/Toronto").time
+    except Exception:
+        df_local["Time"] = df_local.index.time
+
     start_dt = df_local.index[0]
     end_dt = start_dt + dt.timedelta(minutes=opening_minutes)
     or_df = df_local[(df_local.index >= start_dt) & (df_local.index < end_dt)]
@@ -60,13 +60,6 @@ def get_opening_range(df, opening_minutes=15):
     return or_df["High"].max(), or_df["Low"].min()
 
 def score_stock(ticker, df):
-    """
-    Simple scoring based on:
-    - Above VWAP
-    - Near ORH breakout
-    - Trend (EMA 9 > EMA 20)
-    - Volume spike
-    """
     if df.empty:
         return None
 
@@ -95,7 +88,7 @@ def score_stock(ticker, df):
         if last["Close"] > orh and last["Close"] > last["Open"]:
             score += 2
             reasons.append("Opening range breakout")
-        elif (orh - last["Close"]) / orh < 0.003:  # within 0.3% of ORH
+        elif (orh - last["Close"]) / orh < 0.003:  # within 0.3%
             score += 1
             reasons.append("Near opening range high")
 
@@ -121,18 +114,16 @@ def score_stock(ticker, df):
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.title("🇨🇦 TSX Intraday Scanner (1‑Minute Refresh)")
+st.title("🇨🇦 TSX Intraday Scanner (Auto‑Refresh)")
 
 st.markdown(
     """
-This app scans selected **TSX stocks** every minute and ranks them by a simple intraday score based on:
+Scans selected **TSX stocks** and ranks them by a simple intraday score based on:
 
 - Opening range breakout
 - VWAP bias
 - Short-term trend (EMA 9 vs EMA 20)
 - Volume spike
-
-You can extend the logic to match your full playbook.
 """
 )
 
@@ -145,16 +136,13 @@ tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
 
 refresh_interval = st.slider("Auto-refresh interval (seconds)", 30, 300, 60)
 
-st.info("App will auto-refresh using Streamlit's rerun mechanism. Leave this tab open.")
+# True timed auto-refresh
+st_autorefresh(interval=refresh_interval * 1000, key="datarefresh")
 
-# Auto-refresh
-st_autorefresh = st.experimental_rerun  # placeholder to show intent
-
-# Simple manual refresh button
 if st.button("Refresh now"):
     st.experimental_rerun()
 
-placeholder = st.empty()
+st.info("Leave this tab open; the table will refresh automatically.")
 
 def run_scan():
     with st.spinner("Fetching data and scanning..."):
@@ -192,8 +180,3 @@ def run_scan():
                     st.write(f"- {r}")
 
 run_scan()
-
-# Auto-refresh loop (simple approach: rely on Streamlit Cloud session reruns)
-# In Streamlit Cloud, you typically use st_autorefresh, but it's experimental.
-# Here we simulate periodic reruns via user slider + manual refresh.
-st.caption("Tip: On Streamlit Cloud, you can use st_autorefresh for true timed refresh.")
