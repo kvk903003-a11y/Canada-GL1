@@ -11,20 +11,39 @@ import plotly.graph_objects as go
 # ---------------------------------------------------------
 st.set_page_config(page_title="TSX Intraday Scanner", layout="wide")
 
-DEFAULT_TICKERS = [
-    "RY.TO", "TD.TO", "BNS.TO", "ENB.TO", "SHOP.TO",
-    "CNQ.TO", "SU.TO", "BCE.TO", "TRP.TO", "MFC.TO"
+# Universe: large set of Canadian tickers (extend as you like)
+ALL_CANADIAN_TICKERS = [
+    "RY.TO", "TD.TO", "BNS.TO", "BMO.TO", "CM.TO", "NA.TO", "MFC.TO", "SLF.TO", "GWO.TO", "IFC.TO",
+    "BN.TO", "BAM.TO", "FFH.TO", "CP.TO", "CNR.TO", "TFII.TO", "WSP.TO", "WCN.TO", "SU.TO", "CNQ.TO",
+    "CVE.TO", "TOU.TO", "ARX.TO", "MEG.TO", "WCP.TO", "VET.TO", "ENB.TO", "TRP.TO", "PPL.TO", "KEY.TO",
+    "NPI.TO", "FTS.TO", "EMA.TO", "AQN.TO", "TA.TO", "SHOP.TO", "CSU.TO", "GIB.A.TO", "OTEX.TO", "LSPD.TO",
+    "KXS.TO", "DSG.TO", "DCBO.TO", "NVEI.TO", "ATD.TO", "QSR.TO", "DOL.TO", "L.TO", "MRU.TO", "GOOS.TO",
+    "ATZ.TO", "GIL.TO", "TECK.B.TO", "LUN.TO", "HBM.TO", "IVN.TO", "FVI.TO", "PAAS.TO", "ELD.TO", "AGI.TO",
+    "AEM.TO", "FR.TO", "WPM.TO", "CCO.TO", "NXE.TO", "EFR.TO", "BHC.TO", "WELL.TO", "JWEL.TO", "BCE.TO",
+    "T.TO", "RCI.B.TO", "QBR.B.TO", "TRI.TO", "CAR.UN.TO", "REI.UN.TO", "GRT.UN.TO", "SRU.UN.TO", "DIR.UN.TO",
+    "AIF.TO", "CAE.TO", "ATS.TO", "WTE.TO", "BBD.B.TO", "DOO.TO", "MG.TO", "NFI.TO", "STN.TO", "TIH.TO",
+    "RBA.TO", "FNV.TO", "ABX.TO", "NGD.TO", "OR.TO", "SSL.TO", "SAP.TO", "EMP.A.TO", "FCR.UN.TO", "BEI.UN.TO",
+    "CHP.UN.TO", "HR.UN.TO", "AP.UN.TO", "NWH.UN.TO", "PKI.TO", "ATCO.TO", "ACO.X.TO", "CU.TO", "H.TO",
+    "BLDP.TO", "XTC.TO", "MRE.TO", "LIF.TO", "SCL.TO", "SJR.B.TO", "CIX.TO", "POW.TO", "WN.TO", "CPX.TO",
+    "ALA.TO", "GEI.TO", "BIR.TO", "PEY.TO", "ERF.TO", "TVE.TO", "KEL.TO", "AR.TO", "CR.TO", "BTE.TO",
+    "CPG.TO", "NVA.TO", "VII.TO", "BIPC.TO", "BEPC.TO", "NTR.TO", "CF.TO", "HCG.TO", "EQB.TO", "LB.TO",
+    "MKP.TO", "FSZ.TO", "GSY.TO", "PRM.TO", "HPS.A.TO", "BAD.TO", "ARE.TO", "AC.TO", "CJT.TO", "MDA.TO",
+    "MAL.TO", "RCH.TO", "RUS.TO", "WPK.TO", "CAS.TO", "CCL.B.TO", "ITP.TO", "RPI.UN.TO", "YRI.TO", "PBH.TO",
+    "LNF.TO", "BYD.TO", "MTY.TO", "PZA.TO", "AW.UN.TO", "BPF.UN.TO", "KEG.UN.TO", "CRT.UN.TO", "IIP.UN.TO",
+    "MRG.UN.TO", "SOT.UN.TO", "SMU.UN.TO", "TCN.TO", "HOM.UN.TO", "NVU.UN.TO", "GDI.TO", "CJR.B.TO", "BB.TO",
+    "BBTV.TO", "REAL.TO", "CTS.TO", "TCS.TO", "ENGH.TO", "SYZ.TO", "MDF.TO", "QIPT.TO", "PHO.TO", "DND.TO",
+    "ABCL.TO", "CRDL.TO", "ACB.TO", "TLRY.TO", "OGI.TO", "HEXO.TO", "FIRE.TO"
 ]
 
 OPENING_RANGE_MINUTES = 15
 
 # ---------------------------------------------------------
-# SIDEBAR STRATEGY SETTINGS
+# SIDEBAR SETTINGS (used mainly for backtest)
 # ---------------------------------------------------------
 st.sidebar.header("Strategy Settings")
 
-strategy = st.sidebar.selectbox(
-    "Choose Strategy",
+backtest_strategy_name = st.sidebar.selectbox(
+    "Backtest Strategy",
     [
         "Opening Range Breakout",
         "VWAP Pullback",
@@ -34,9 +53,17 @@ strategy = st.sidebar.selectbox(
     ],
 )
 
-risk_reward = st.sidebar.slider("Risk/Reward Target", 1.0, 5.0, 2.0)
+risk_reward = st.sidebar.slider("Risk/Reward Target (%)", 1.0, 5.0, 2.0)
 pullback_depth = st.sidebar.slider("VWAP Pullback Depth (%)", 0.1, 2.0, 0.5)
 ema_trend_strength = st.sidebar.slider("Trend Strength (EMA9‑EMA20)", 0.0, 1.0, 0.2)
+
+ALL_STRATEGIES = [
+    "Opening Range Breakout",
+    "VWAP Pullback",
+    "Trend Continuation",
+    "Reversal Setup",
+    "All Strategies (Weighted)",
+]
 
 # ---------------------------------------------------------
 # DATA FUNCTIONS
@@ -168,14 +195,13 @@ def detect_patterns(df):
 
 
 # ---------------------------------------------------------
-# SCORING + BUY/SELL LOGIC
+# SCORING + BUY/SELL LOGIC (ALL STRATEGIES COMBINED)
 # ---------------------------------------------------------
 def score_stock(ticker, df):
     if df.empty:
         return None
 
     df = compute_vwap(compute_emas(df))
-
     last = df.tail(1).iloc[0]
 
     try:
@@ -192,20 +218,24 @@ def score_stock(ticker, df):
     score = 0
     reasons = []
 
+    # Base conditions
     if close > vwap:
         score += 1
         reasons.append("Above VWAP")
-
     if ema9 > ema20:
         score += 1
         reasons.append("EMA9 > EMA20 (uptrend)")
 
-    strat_score, strat_reasons = apply_strategy_logic(
-        strategy, close, vwap, ema9, ema20, orh, orl, df
-    )
-    score += strat_score
-    reasons.extend(strat_reasons)
+    # Combine all strategies
+    for strat in ALL_STRATEGIES:
+        strat_score, strat_reasons = apply_strategy_logic(
+            strat, close, vwap, ema9, ema20, orh, orl, df
+        )
+        score += strat_score
+        for r in strat_reasons:
+            reasons.append(f"{strat}: {r}")
 
+    # Volume spike
     if len(df) > 20:
         avg_vol = float(df["Volume"].tail(20).mean())
         if volume > avg_vol * 1.5:
@@ -258,7 +288,7 @@ def get_multi_tf_snapshot(ticker):
 # ---------------------------------------------------------
 # BACKTEST ENGINE + CSV EXPORT
 # ---------------------------------------------------------
-def backtest_strategy(ticker, strategy, days=5):
+def backtest_strategy(ticker, strategy_name, days=5):
     df = yf.download(ticker, interval="5m", period=f"{days}d", progress=False)
     if df.empty:
         return None, 0.0
@@ -279,7 +309,7 @@ def backtest_strategy(ticker, strategy, days=5):
         ema9 = float(row["EMA_9"])
         ema20 = float(row["EMA_20"])
 
-        score, _ = apply_strategy_logic(strategy, close, vwap, ema9, ema20, None, None, df)
+        score, _ = apply_strategy_logic(strategy_name, close, vwap, ema9, ema20, None, None, df)
 
         if position == 0 and score >= 2:
             position = 1
@@ -306,14 +336,9 @@ def backtest_strategy(ticker, strategy, days=5):
 # ---------------------------------------------------------
 # STREAMLIT UI
 # ---------------------------------------------------------
-st.title("🇨🇦 TSX Intraday Scanner — Strategies, Charts, Backtests")
+st.title("🇨🇦 TSX Intraday Scanner — All Stocks, Top 10 Across All Strategies")
 
-tickers_input = st.text_input(
-    "TSX tickers (comma-separated, with .TO):",
-    value=", ".join(DEFAULT_TICKERS),
-)
-
-tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
+tickers = ALL_CANADIAN_TICKERS  # scan the whole universe defined above
 
 refresh_interval = st.slider("Auto-refresh interval (seconds)", 30, 300, 60)
 st_autorefresh(interval=refresh_interval * 1000, key="refresh")
@@ -332,7 +357,7 @@ def run_scan():
             debug_rows.append([t, "OK", len(data[t])])
         else:
             debug_rows.append([t, "NO DATA", 0])
-    st.table(pd.DataFrame(debug_rows, columns=["Ticker", "Status", "Rows"]))
+    st.dataframe(pd.DataFrame(debug_rows, columns=["Ticker", "Status", "Rows"]), use_container_width=True)
 
     rows = []
 
@@ -340,8 +365,6 @@ def run_scan():
         res = score_stock(t, df)
         if res:
             rows.append(res)
-        else:
-            st.write(f"⚠️ Skipped {t} — scoring returned None")
 
     if not rows:
         st.error("❌ No valid stocks found. This is normal when the market is closed or data is limited.")
@@ -365,9 +388,12 @@ def run_scan():
 
     df_scores = df_scores.sort_values("performance", ascending=False)
 
-    st.subheader("📊 Ranked Intraday Opportunities")
+    # Only top 10 best to invest (across all strategies)
+    top10 = df_scores.head(10)
+
+    st.subheader("🏆 Top 10 Canadian Stocks (All Strategies Combined)")
     st.dataframe(
-        df_scores[
+        top10[
             [
                 "ticker",
                 "performance",
@@ -384,9 +410,13 @@ def run_scan():
         use_container_width=True,
     )
 
-    st.subheader("Details")
+    st.subheader("Details for Top 10")
 
-    for r in rows:
+    # Only show details for top 10
+    top10_tickers = set(top10["ticker"].tolist())
+    top_rows = [r for r in rows if r["ticker"] in top10_tickers]
+
+    for r in top_rows:
         t = r["ticker"]
         df = r["df"]
 
@@ -435,8 +465,8 @@ def run_scan():
                     f"EMA9={vals['ema9']:.2f}, EMA20={vals['ema20']:.2f}"
                 )
 
-            st.write("### Backtest (5 days, current strategy)")
-            bt_df, pnl = backtest_strategy(t, strategy, days=5)
+            st.write("### Backtest (5 days, selected strategy)")
+            bt_df, pnl = backtest_strategy(t, backtest_strategy_name, days=5)
             if bt_df is not None:
                 st.write(f"Total PnL: {pnl:.2f}")
                 st.dataframe(bt_df, use_container_width=True)
@@ -445,7 +475,7 @@ def run_scan():
                 st.download_button(
                     label="Download Backtest CSV",
                     data=csv,
-                    file_name=f"{t}_backtest_{strategy.replace(' ', '_')}.csv",
+                    file_name=f"{t}_backtest_{backtest_strategy_name.replace(' ', '_')}.csv",
                     mime="text/csv",
                 )
             else:
