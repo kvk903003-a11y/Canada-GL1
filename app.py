@@ -13,16 +13,36 @@ st.set_page_config(page_title="TSX Intraday Scanner — ML, Sectors, Pre‑Marke
 OPENING_RANGE_MINUTES = 15
 
 # ---------------------------------------------------------
-# GLOBAL COLUMN FLATTENER
+# GLOBAL SAFE HELPERS
 # ---------------------------------------------------------
 def flatten(df: pd.DataFrame | None) -> pd.DataFrame | None:
     if df is None or df.empty:
         return df
-    try:
+    if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-    except Exception:
-        pass
     return df
+
+
+def safe_close_series(df: pd.DataFrame):
+    """
+    Always return a 1D Series for Close, even if df["Close"] is a DataFrame.
+    """
+    if "Close" not in df.columns:
+        return None
+    s = df["Close"]
+    if isinstance(s, pd.DataFrame):
+        # take the first column if multi-column
+        s = s.iloc[:, 0]
+    return s
+
+
+def safe_volume_series(df: pd.DataFrame):
+    if "Volume" not in df.columns:
+        return None
+    s = df["Volume"]
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    return s
 
 # ---------------------------------------------------------
 # CACHED HELPERS
@@ -44,6 +64,7 @@ def fetch_tsx_tickers_live():
             "NPI.TO","FTS.TO","EMA.TO","AQN.TO","TA.TO","SHOP.TO","CSU.TO","GIB.A.TO","OTEX.TO","LSPD.TO",
         ]
 
+
 @st.cache_data(ttl=3600)
 def get_sector(ticker: str) -> str:
     try:
@@ -51,6 +72,7 @@ def get_sector(ticker: str) -> str:
         return info.get("sector", "Unknown")
     except Exception:
         return "Unknown"
+
 
 @st.cache_data(ttl=60)
 def cached_download(ticker: str, interval: str = "1m", period: str = "1d", prepost: bool = False):
@@ -103,8 +125,11 @@ def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retri
                 df = flatten(df)
                 if df is None or df.empty:
                     continue
+
+                # ensure basic columns exist
                 if not {"Open", "High", "Low", "Close", "Volume"}.issubset(df.columns):
                     continue
+
                 df = df.dropna()
                 df = df[~df.index.duplicated(keep="last")]
                 df = df.sort_index()
@@ -134,20 +159,26 @@ def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retri
 
     return data
 
+
 def compute_emas(df):
     df = flatten(df.copy())
-    if "Close" not in df.columns:
+    close = safe_close_series(df)
+    if close is None:
         return df
-    df["EMA_9"] = df["Close"].ewm(span=9, adjust=False).mean()
-    df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    df["EMA_9"] = close.ewm(span=9, adjust=False).mean()
+    df["EMA_20"] = close.ewm(span=20, adjust=False).mean()
     return df
+
 
 def compute_vwap(df):
     df = flatten(df.copy())
-    if not {"Close", "Volume"}.issubset(df.columns):
+    close = safe_close_series(df)
+    vol = safe_volume_series(df)
+    if close is None or vol is None:
         return df
-    df["VWAP"] = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
+    df["VWAP"] = (close * vol).cumsum() / vol.cumsum()
     return df
+
 
 def get_opening_range(df):
     if df.empty:
@@ -227,11 +258,19 @@ def ml_score_from_df(df: pd.DataFrame) -> float:
     if not {"Close", "Volume"}.issubset(df.columns):
         return 0.0
 
-    df["ret"] = df["Close"].pct_change()
+    close = safe_close_series(df)
+    vol = safe_volume_series(df)
+    if close is None or vol is None:
+        return 0.0
+
+    df["Close_safe"] = close
+    df["Volume_safe"] = vol
+
+    df["ret"] = df["Close_safe"].pct_change()
     df["future_ret"] = df["ret"].shift(-1)
 
-    df["vol_z"] = (df["Volume"] - df["Volume"].rolling(20).mean()) / (
-        df["Volume"].rolling(20).std() + 1e-9
+    df["vol_z"] = (df["Volume_safe"] - df["Volume_safe"].rolling(20).mean()) / (
+        df["Volume_safe"].rolling(20).std() + 1e-9
     )
 
     df = compute_emas(df)
