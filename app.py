@@ -9,68 +9,63 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ---------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------
-st.set_page_config(page_title="TSX Intraday Scanner — Top 10 All Strategies", layout="wide")
-
+st.set_page_config(page_title="TSX Intraday Scanner — ML, Sectors, Pre‑Market", layout="wide")
 OPENING_RANGE_MINUTES = 15
+
+# ---------------------------------------------------------
+# GLOBAL COLUMN FLATTENER
+# ---------------------------------------------------------
+def flatten(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if df is None or df.empty:
+        return df
+    try:
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    except Exception:
+        pass
+    return df
 
 # ---------------------------------------------------------
 # CACHED HELPERS
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def fetch_tsx_tickers_live():
-    """
-    Try to scrape a broad TSX universe.
-    If scraping fails, fall back to a large static list.
-    """
     try:
         url = "https://en.wikipedia.org/wiki/S%26P/TSX_Composite_Index"
         tables = pd.read_html(url)
         comp = tables[0]
-        tickers = (
-            comp.iloc[:, 0]
-            .astype(str)
-            .str.strip()
-            .str.replace(".", "-", regex=False)
-        )
+        tickers = comp.iloc[:, 0].astype(str).str.strip()
         tickers = [t + ".TO" if not t.endswith(".TO") else t for t in tickers]
-        tickers = sorted(list(set(tickers)))
-        return tickers
+        return sorted(list(set(tickers)))
     except Exception:
-        fallback = [
-            "RY.TO", "TD.TO", "BNS.TO", "BMO.TO", "CM.TO", "NA.TO", "MFC.TO", "SLF.TO", "GWO.TO", "IFC.TO",
-            "BN.TO", "BAM.TO", "FFH.TO", "CP.TO", "CNR.TO", "TFII.TO", "WSP.TO", "WCN.TO", "SU.TO", "CNQ.TO",
-            "CVE.TO", "TOU.TO", "ARX.TO", "MEG.TO", "WCP.TO", "VET.TO", "ENB.TO", "TRP.TO", "PPL.TO", "KEY.TO",
-            "NPI.TO", "FTS.TO", "EMA.TO", "AQN.TO", "TA.TO", "SHOP.TO", "CSU.TO", "GIB.A.TO", "OTEX.TO", "LSPD.TO",
-            "KXS.TO", "DSG.TO", "DCBO.TO", "NVEI.TO", "ATD.TO", "QSR.TO", "DOL.TO", "L.TO", "MRU.TO", "GOOS.TO",
-            "ATZ.TO", "GIL.TO", "TECK.B.TO", "LUN.TO", "HBM.TO", "IVN.TO", "FVI.TO", "PAAS.TO", "ELD.TO", "AGI.TO",
-            "AEM.TO", "FR.TO", "WPM.TO", "CCO.TO", "NXE.TO", "EFR.TO", "BHC.TO", "WELL.TO", "JWEL.TO", "BCE.TO",
-            "T.TO", "RCI.B.TO", "QBR.B.TO", "TRI.TO", "CAR.UN.TO", "REI.UN.TO", "GRT.UN.TO", "SRU.UN.TO", "DIR.UN.TO",
-            "AIF.TO", "CAE.TO", "ATS.TO", "WTE.TO", "BBD.B.TO", "DOO.TO", "MG.TO", "NFI.TO", "STN.TO", "TIH.TO",
-            "RBA.TO", "FNV.TO", "ABX.TO", "NGD.TO", "OR.TO", "SSL.TO", "SAP.TO", "EMP.A.TO", "FCR.UN.TO", "BEI.UN.TO",
-            "CHP.UN.TO", "HR.UN.TO", "AP.UN.TO", "NWH.UN.TO", "PKI.TO", "ATCO.TO", "ACO.X.TO", "CU.TO", "H.TO",
-            "BLDP.TO", "XTC.TO", "MRE.TO", "LIF.TO", "SCL.TO", "SJR.B.TO", "CIX.TO", "POW.TO", "WN.TO", "CPX.TO",
-            "ALA.TO", "GEI.TO", "BIR.TO", "PEY.TO", "ERF.TO", "TVE.TO", "KEL.TO", "AR.TO", "CR.TO", "BTE.TO",
-            "CPG.TO", "NVA.TO", "VII.TO", "BIPC.TO", "BEPC.TO", "NTR.TO", "CF.TO", "HCG.TO", "EQB.TO", "LB.TO",
-            "MKP.TO", "FSZ.TO", "GSY.TO", "PRM.TO", "HPS.A.TO", "BAD.TO", "ARE.TO", "AC.TO", "CJT.TO", "MDA.TO",
-            "MAL.TO", "RCH.TO", "RUS.TO", "WPK.TO", "CAS.TO", "CCL.B.TO", "ITP.TO", "RPI.UN.TO", "YRI.TO", "PBH.TO",
-            "LNF.TO", "BYD.TO", "MTY.TO", "PZA.TO", "AW.UN.TO", "BPF.UN.TO", "KEG.UN.TO", "CRT.UN.TO", "IIP.UN.TO",
-            "MRG.UN.TO", "SOT.UN.TO", "SMU.UN.TO", "TCN.TO", "HOM.UN.TO", "NVU.UN.TO", "GDI.TO", "CJR.B.TO", "BB.TO",
-            "BBTV.TO", "REAL.TO", "CTS.TO", "TCS.TO", "ENGH.TO", "SYZ.TO", "MDF.TO", "QIPT.TO", "PHO.TO", "DND.TO",
-            "ABCL.TO", "CRDL.TO", "ACB.TO", "TLRY.TO", "OGI.TO", "HEXO.TO", "FIRE.TO",
+        return [
+            "RY.TO","TD.TO","BNS.TO","BMO.TO","CM.TO","NA.TO","MFC.TO","SLF.TO","GWO.TO","IFC.TO",
+            "BN.TO","BAM.TO","FFH.TO","CP.TO","CNR.TO","TFII.TO","WSP.TO","WCN.TO","SU.TO","CNQ.TO",
+            "CVE.TO","TOU.TO","ARX.TO","MEG.TO","WCP.TO","VET.TO","ENB.TO","TRP.TO","PPL.TO","KEY.TO",
+            "NPI.TO","FTS.TO","EMA.TO","AQN.TO","TA.TO","SHOP.TO","CSU.TO","GIB.A.TO","OTEX.TO","LSPD.TO",
         ]
-        return fallback
 
+@st.cache_data(ttl=3600)
+def get_sector(ticker: str) -> str:
+    try:
+        info = yf.Ticker(ticker).info
+        return info.get("sector", "Unknown")
+    except Exception:
+        return "Unknown"
 
 @st.cache_data(ttl=60)
-def cached_download(ticker: str, interval: str = "1m", period: str = "1d"):
-    df = yf.download(ticker, interval=interval, period=period, progress=False)
-    return df
-
+def cached_download(ticker: str, interval: str = "1m", period: str = "1d", prepost: bool = False):
+    df = yf.download(ticker, interval=interval, period=period, progress=False, prepost=prepost)
+    return flatten(df)
 
 # ---------------------------------------------------------
-# SIDEBAR SETTINGS (for backtest)
+# SIDEBAR SETTINGS
 # ---------------------------------------------------------
-st.sidebar.header("Strategy Settings")
+st.sidebar.header("Scanner Settings")
+
+session_type = st.sidebar.selectbox(
+    "Session",
+    ["Regular Hours", "Pre‑Market"],
+)
 
 backtest_strategy_name = st.sidebar.selectbox(
     "Backtest Strategy",
@@ -98,32 +93,34 @@ ALL_STRATEGIES = [
 # ---------------------------------------------------------
 # DATA FUNCTIONS
 # ---------------------------------------------------------
-def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retries=3):
+def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retries=3, prepost=False):
     data = {}
 
     def fetch_one(t):
         for _ in range(retries):
             try:
-                df = cached_download(t, interval=interval, period=period)
+                df = cached_download(t, interval=interval, period=period, prepost=prepost)
+                df = flatten(df)
                 if df is None or df.empty:
                     continue
-
-                # HARD FLATTEN: kill multi-index columns immediately
-                try:
-                    df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-                except Exception:
-                    return t, None
-
-                required_cols = {"Open", "High", "Low", "Close", "Volume"}
-                if not required_cols.issubset(df.columns):
+                if not {"Open", "High", "Low", "Close", "Volume"}.issubset(df.columns):
                     continue
-
                 df = df.dropna()
                 df = df[~df.index.duplicated(keep="last")]
                 df = df.sort_index()
-
                 if df.empty:
                     continue
+
+                # If pre‑market, optionally filter to pre‑open (TSX ~ 09:30 ET)
+                if session_type == "Pre‑Market":
+                    # yfinance index is usually timezone‑aware; keep everything before 09:30 local
+                    try:
+                        idx = df.index.tz_convert("America/Toronto")
+                        df = df[idx.time < dt.time(9, 30)]
+                        if df.empty:
+                            continue
+                    except Exception:
+                        pass
 
                 return t, df
             except Exception:
@@ -139,23 +136,20 @@ def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retri
 
     return data
 
-
-def compute_vwap(df):
-    df = df.copy()
-    if not {"Close", "Volume"}.issubset(df.columns):
-        return df
-    df["VWAP"] = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
-    return df
-
-
 def compute_emas(df):
-    df = df.copy()
+    df = flatten(df.copy())
     if "Close" not in df.columns:
         return df
     df["EMA_9"] = df["Close"].ewm(span=9, adjust=False).mean()
     df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
     return df
 
+def compute_vwap(df):
+    df = flatten(df.copy())
+    if not {"Close", "Volume"}.issubset(df.columns):
+        return df
+    df["VWAP"] = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
+    return df
 
 def get_opening_range(df):
     if df.empty:
@@ -166,7 +160,6 @@ def get_opening_range(df):
     if or_df.empty:
         return None, None
     return float(or_df["High"].max()), float(or_df["Low"].min())
-
 
 # ---------------------------------------------------------
 # STRATEGY LOGIC
@@ -225,6 +218,45 @@ def apply_strategy_logic(strategy, close, vwap, ema9, ema20, orh, orl, df):
 
     return score, reasons
 
+# ---------------------------------------------------------
+# LIGHT ML SCORING (LINEAR MODEL ON PAST RETURNS)
+# ---------------------------------------------------------
+def ml_score_from_df(df: pd.DataFrame) -> float:
+    df = flatten(df.copy())
+    if "Close" not in df.columns or "Volume" not in df.columns:
+        return 0.0
+
+    df["ret"] = df["Close"].pct_change()
+    df["future_ret"] = df["ret"].shift(-1)
+
+    df["vol_z"] = (df["Volume"] - df["Volume"].rolling(20).mean()) / (df["Volume"].rolling(20).std() + 1e-9)
+    df = compute_emas(df)
+    if not {"EMA_9", "EMA_20"}.issubset(df.columns):
+        return 0.0
+    df["ema_diff"] = df["EMA_9"] - df["EMA_20"]
+
+    feat_cols = ["ret", "vol_z", "ema_diff"]
+    if any(c not in df.columns for c in feat_cols):
+        return 0.0
+
+    sub = df.dropna(subset=feat_cols + ["future_ret"]).copy()
+    if len(sub) < 40:
+        return 0.0
+
+    X = sub[feat_cols].values
+    y = sub["future_ret"].values
+
+    X = np.hstack([np.ones((X.shape[0], 1)), X])  # add bias
+    try:
+        w, *_ = np.linalg.lstsq(X, y, rcond=None)
+    except Exception:
+        return 0.0
+
+    last_row = df.iloc[[-2]] if len(df) > 2 else df.tail(1)
+    x_last = last_row[feat_cols].values
+    x_last = np.hstack([np.ones((x_last.shape[0], 1)), x_last])
+    pred = float(x_last @ w)
+    return float(np.clip(pred * 100, -5, 5))  # scale to a small range
 
 # ---------------------------------------------------------
 # PATTERN DETECTION
@@ -256,17 +288,14 @@ def detect_patterns(df):
 
     return patterns
 
-
 # ---------------------------------------------------------
-# SCORING + BUY/SELL LOGIC (ALL STRATEGIES COMBINED)
+# SCORING (ALL STRATEGIES + ML)
 # ---------------------------------------------------------
 def score_stock(ticker, df):
-    if df.empty:
-        return None
-
+    df = flatten(df)
     df = compute_vwap(compute_emas(df))
-    required = {"Close", "Volume", "VWAP", "EMA_9", "EMA_20"}
-    if not required.issubset(df.columns):
+
+    if not {"Close", "Volume", "VWAP", "EMA_9", "EMA_20"}.issubset(df.columns):
         return None
 
     last = df.tail(1).iloc[0]
@@ -297,8 +326,7 @@ def score_stock(ticker, df):
             strat, close, vwap, ema9, ema20, orh, orl, df
         )
         score += strat_score
-        for r in strat_reasons:
-            reasons.append(f"{strat}: {r}")
+        reasons.extend([f"{strat}: {r}" for r in strat_reasons])
 
     if len(df) > 20:
         avg_vol = float(df["Volume"].tail(20).mean())
@@ -306,16 +334,21 @@ def score_stock(ticker, df):
             score += 1
             reasons.append("Volume spike")
 
+    ml_score = ml_score_from_df(df)
+
     buy_price = close
     sell_price = round(close * (1 + (risk_reward / 100)), 4)
     momentum = ema9 - ema20
-    performance = score + momentum
+    performance = score + momentum + ml_score
 
     patterns = detect_patterns(df)
+    sector = get_sector(ticker)
 
     return {
         "ticker": ticker,
+        "sector": sector,
         "score": score,
+        "ml_score": ml_score,
         "performance": float(performance),
         "buy_price": float(buy_price),
         "sell_price": float(sell_price),
@@ -329,38 +362,8 @@ def score_stock(ticker, df):
         "df": df,
     }
 
-
 # ---------------------------------------------------------
-# MULTI‑TIMEFRAME SNAPSHOT (TEXT ONLY)
-# ---------------------------------------------------------
-def get_multi_tf_snapshot(ticker):
-    frames = {}
-    for interval in ["1m", "5m", "15m"]:
-        try:
-            df = yf.download(ticker, interval=interval, period="1d", progress=False)
-            if df is None or df.empty:
-                continue
-            try:
-                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-            except Exception:
-                continue
-            df = compute_emas(df)
-            df = df.dropna()
-            if not {"Close", "EMA_9", "EMA_20"}.issubset(df.columns):
-                continue
-            last = df.tail(1).iloc[0]
-            frames[interval] = {
-                "close": float(last["Close"]),
-                "ema9": float(last["EMA_9"]),
-                "ema20": float(last["EMA_20"]),
-            }
-        except Exception:
-            continue
-    return frames
-
-
-# ---------------------------------------------------------
-# BACKTEST ENGINE + CSV EXPORT
+# BACKTEST (NO CHARTS)
 # ---------------------------------------------------------
 def backtest_strategy(ticker, strategy_name, days=5):
     try:
@@ -368,21 +371,14 @@ def backtest_strategy(ticker, strategy_name, days=5):
     except Exception:
         return None, 0.0
 
-    if df is None or df.empty:
-        return None, 0.0
-
-    try:
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-    except Exception:
-        return None, 0.0
-
+    df = flatten(df)
     df = compute_vwap(compute_emas(df))
+    if not {"Close", "VWAP", "EMA_9", "EMA_20"}.issubset(df.columns):
+        return None, 0.0
+
     df = df.dropna()
     df = df[~df.index.duplicated(keep="last")]
     df = df.sort_index()
-
-    if not {"Close", "VWAP", "EMA_9", "EMA_20"}.issubset(df.columns):
-        return None, 0.0
 
     position = 0
     entry = 0.0
@@ -418,51 +414,42 @@ def backtest_strategy(ticker, strategy_name, days=5):
     bt_df = pd.DataFrame(trades)
     return bt_df, pnl
 
-
 # ---------------------------------------------------------
 # STREAMLIT UI
 # ---------------------------------------------------------
-st.title("🇨🇦 TSX Intraday Scanner — All Stocks, Top 10 Across All Strategies")
+st.title("🇨🇦 TSX Intraday Scanner — ML Scoring, Sector‑Balanced, Pre‑Market")
 
 all_tickers = fetch_tsx_tickers_live()
-st.write(f"Scanning {len(all_tickers)} Canadian tickers live.")
+st.write(f"Scanning {len(all_tickers)} Canadian tickers live — Session: {session_type}")
 
 refresh_interval = st.slider("Auto-refresh interval (seconds)", 30, 300, 60)
 st_autorefresh(interval=refresh_interval * 1000, key="refresh")
-
 
 # ---------------------------------------------------------
 # MAIN SCAN
 # ---------------------------------------------------------
 def run_scan():
-    data = get_intraday_data(all_tickers)
-
-    st.subheader("Debug: Data Status")
-    debug_rows = []
-    for t in all_tickers:
-        if t in data:
-            debug_rows.append([t, "OK", len(data[t])])
-        else:
-            debug_rows.append([t, "NO DATA", 0])
-    st.dataframe(pd.DataFrame(debug_rows, columns=["Ticker", "Status", "Rows"]), use_container_width=True)
+    prepost = session_type == "Pre‑Market"
+    data = get_intraday_data(all_tickers, prepost=prepost)
 
     rows = []
-
     for t, df in data.items():
         res = score_stock(t, df)
         if res:
             rows.append(res)
 
     if not rows:
-        st.error("❌ No valid stocks found. This is normal when the market is closed or data is limited.")
+        st.error("No valid stocks found (market may be closed or data limited).")
         return
 
     df_scores = pd.DataFrame(
         [
             {
                 "ticker": r["ticker"],
+                "sector": r["sector"],
                 "performance": r["performance"],
                 "score": r["score"],
+                "ml_score": r["ml_score"],
                 "buy_price": r["buy_price"],
                 "sell_price": r["sell_price"],
                 "vwap": r["vwap"],
@@ -477,15 +464,31 @@ def run_scan():
 
     df_scores = df_scores.sort_values("performance", ascending=False)
 
-    top10 = df_scores.head(10)
+    # Sector‑balanced top 10
+    max_per_sector = 3
+    picked = []
+    counts = {}
 
-    st.subheader("🏆 Top 10 Canadian Stocks (All Strategies Combined)")
+    for _, row in df_scores.iterrows():
+        sec = row["sector"]
+        counts.setdefault(sec, 0)
+        if counts[sec] < max_per_sector:
+            picked.append(row)
+            counts[sec] += 1
+        if len(picked) >= 10:
+            break
+
+    top10 = pd.DataFrame(picked)
+
+    st.subheader("🏆 Sector‑Balanced Top 10 (All Strategies + ML)")
     st.dataframe(
         top10[
             [
                 "ticker",
+                "sector",
                 "performance",
                 "score",
+                "ml_score",
                 "buy_price",
                 "sell_price",
                 "vwap",
@@ -499,48 +502,36 @@ def run_scan():
     )
 
     st.subheader("Details for Top 10")
-
     top10_tickers = set(top10["ticker"].tolist())
-    top_rows = [r for r in rows if r["ticker"] in top10_tickers]
 
-    for r in top_rows:
-        t = r["ticker"]
-        df = r["df"]
+    for r in rows:
+        if r["ticker"] not in top10_tickers:
+            continue
 
-        with st.expander(f"{t} — Score {r['score']} — Perf {r['performance']:.2f}"):
-            st.write("**Buy price:**", r["buy_price"])
-            st.write("**Sell price:**", r["sell_price"])
-            st.write("**VWAP:**", r["vwap"])
-            st.write("**EMA 9 / EMA 20:**", r["ema9"], "/", r["ema20"])
-            st.write("**ORH / ORL:**", r["orh"], "/", r["orl"])
+        with st.expander(f"{r['ticker']} — Sector {r['sector']} — Score {r['score']} — ML {r['ml_score']:.2f} — Perf {r['performance']:.2f}"):
+            st.write("Buy price:", r["buy_price"])
+            st.write("Sell price:", r["sell_price"])
+            st.write("VWAP:", r["vwap"])
+            st.write("EMA9 / EMA20:", r["ema9"], "/", r["ema20"])
+            st.write("ORH / ORL:", r["orh"], "/", r["orl"])
+            st.write("Patterns:", ", ".join(r["patterns"]))
+            st.write("Reasons:")
+            for reason in r["reasons"]:
+                st.write("-", reason)
 
-            st.write("### Patterns")
-            for p in r["patterns"]:
-                st.write(f"- {p}")
-
-            st.write("### Multi‑Timeframe Trend (1m / 5m / 15m)")
-            mtf = get_multi_tf_snapshot(t)
-            for tf, vals in mtf.items():
-                st.write(
-                    f"- {tf}: Close={vals['close']:.2f}, "
-                    f"EMA9={vals['ema9']:.2f}, EMA20={vals['ema20']:.2f}"
-                )
-
-            st.write("### Backtest (5 days, selected strategy)")
-            bt_df, pnl = backtest_strategy(t, backtest_strategy_name, days=5)
+            st.write("Backtest (5 days, selected strategy)")
+            bt_df, pnl = backtest_strategy(r["ticker"], backtest_strategy_name, days=5)
             if bt_df is not None:
                 st.write(f"Total PnL: {pnl:.2f}")
                 st.dataframe(bt_df, use_container_width=True)
-
                 csv = bt_df.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     label="Download Backtest CSV",
                     data=csv,
-                    file_name=f"{t}_backtest_{backtest_strategy_name.replace(' ', '_')}.csv",
+                    file_name=f"{r['ticker']}_backtest_{backtest_strategy_name.replace(' ', '_')}.csv",
                     mime="text/csv",
                 )
             else:
                 st.write("No backtest trades generated.")
-
 
 run_scan()
