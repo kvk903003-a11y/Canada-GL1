@@ -5,40 +5,77 @@ import yfinance as yf
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import plotly.graph_objects as go
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ---------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------
 st.set_page_config(page_title="TSX Intraday Scanner", layout="wide")
 
-# Universe: large set of Canadian tickers (extend as you like)
-ALL_CANADIAN_TICKERS = [
-    "RY.TO", "TD.TO", "BNS.TO", "BMO.TO", "CM.TO", "NA.TO", "MFC.TO", "SLF.TO", "GWO.TO", "IFC.TO",
-    "BN.TO", "BAM.TO", "FFH.TO", "CP.TO", "CNR.TO", "TFII.TO", "WSP.TO", "WCN.TO", "SU.TO", "CNQ.TO",
-    "CVE.TO", "TOU.TO", "ARX.TO", "MEG.TO", "WCP.TO", "VET.TO", "ENB.TO", "TRP.TO", "PPL.TO", "KEY.TO",
-    "NPI.TO", "FTS.TO", "EMA.TO", "AQN.TO", "TA.TO", "SHOP.TO", "CSU.TO", "GIB.A.TO", "OTEX.TO", "LSPD.TO",
-    "KXS.TO", "DSG.TO", "DCBO.TO", "NVEI.TO", "ATD.TO", "QSR.TO", "DOL.TO", "L.TO", "MRU.TO", "GOOS.TO",
-    "ATZ.TO", "GIL.TO", "TECK.B.TO", "LUN.TO", "HBM.TO", "IVN.TO", "FVI.TO", "PAAS.TO", "ELD.TO", "AGI.TO",
-    "AEM.TO", "FR.TO", "WPM.TO", "CCO.TO", "NXE.TO", "EFR.TO", "BHC.TO", "WELL.TO", "JWEL.TO", "BCE.TO",
-    "T.TO", "RCI.B.TO", "QBR.B.TO", "TRI.TO", "CAR.UN.TO", "REI.UN.TO", "GRT.UN.TO", "SRU.UN.TO", "DIR.UN.TO",
-    "AIF.TO", "CAE.TO", "ATS.TO", "WTE.TO", "BBD.B.TO", "DOO.TO", "MG.TO", "NFI.TO", "STN.TO", "TIH.TO",
-    "RBA.TO", "FNV.TO", "ABX.TO", "NGD.TO", "OR.TO", "SSL.TO", "SAP.TO", "EMP.A.TO", "FCR.UN.TO", "BEI.UN.TO",
-    "CHP.UN.TO", "HR.UN.TO", "AP.UN.TO", "NWH.UN.TO", "PKI.TO", "ATCO.TO", "ACO.X.TO", "CU.TO", "H.TO",
-    "BLDP.TO", "XTC.TO", "MRE.TO", "LIF.TO", "SCL.TO", "SJR.B.TO", "CIX.TO", "POW.TO", "WN.TO", "CPX.TO",
-    "ALA.TO", "GEI.TO", "BIR.TO", "PEY.TO", "ERF.TO", "TVE.TO", "KEL.TO", "AR.TO", "CR.TO", "BTE.TO",
-    "CPG.TO", "NVA.TO", "VII.TO", "BIPC.TO", "BEPC.TO", "NTR.TO", "CF.TO", "HCG.TO", "EQB.TO", "LB.TO",
-    "MKP.TO", "FSZ.TO", "GSY.TO", "PRM.TO", "HPS.A.TO", "BAD.TO", "ARE.TO", "AC.TO", "CJT.TO", "MDA.TO",
-    "MAL.TO", "RCH.TO", "RUS.TO", "WPK.TO", "CAS.TO", "CCL.B.TO", "ITP.TO", "RPI.UN.TO", "YRI.TO", "PBH.TO",
-    "LNF.TO", "BYD.TO", "MTY.TO", "PZA.TO", "AW.UN.TO", "BPF.UN.TO", "KEG.UN.TO", "CRT.UN.TO", "IIP.UN.TO",
-    "MRG.UN.TO", "SOT.UN.TO", "SMU.UN.TO", "TCN.TO", "HOM.UN.TO", "NVU.UN.TO", "GDI.TO", "CJR.B.TO", "BB.TO",
-    "BBTV.TO", "REAL.TO", "CTS.TO", "TCS.TO", "ENGH.TO", "SYZ.TO", "MDF.TO", "QIPT.TO", "PHO.TO", "DND.TO",
-    "ABCL.TO", "CRDL.TO", "ACB.TO", "TLRY.TO", "OGI.TO", "HEXO.TO", "FIRE.TO"
-]
-
 OPENING_RANGE_MINUTES = 15
 
 # ---------------------------------------------------------
-# SIDEBAR SETTINGS (used mainly for backtest)
+# CACHED HELPERS
+# ---------------------------------------------------------
+@st.cache_data(ttl=3600)
+def fetch_tsx_tickers_live():
+    """
+    Try to scrape a broad TSX universe.
+    If scraping fails, fall back to a large static list.
+    """
+    try:
+        # Example: scrape TSX Composite components from a public source
+        # You can replace this URL with a more reliable TSX components source.
+        url = "https://en.wikipedia.org/wiki/S%26P/TSX_Composite_Index"
+        tables = pd.read_html(url)
+        comp = tables[0]
+        # Expect a column with ticker symbols
+        # Wikipedia often lists them without .TO, so we add it.
+        tickers = (
+            comp.iloc[:, 0]
+            .astype(str)
+            .str.strip()
+            .str.replace(".", "-", regex=False)  # sometimes dots used differently
+        )
+        tickers = [t + ".TO" if not t.endswith(".TO") else t for t in tickers]
+        tickers = sorted(list(set(tickers)))
+        return tickers
+    except Exception:
+        # Fallback: large static universe
+        fallback = [
+            "RY.TO", "TD.TO", "BNS.TO", "BMO.TO", "CM.TO", "NA.TO", "MFC.TO", "SLF.TO", "GWO.TO", "IFC.TO",
+            "BN.TO", "BAM.TO", "FFH.TO", "CP.TO", "CNR.TO", "TFII.TO", "WSP.TO", "WCN.TO", "SU.TO", "CNQ.TO",
+            "CVE.TO", "TOU.TO", "ARX.TO", "MEG.TO", "WCP.TO", "VET.TO", "ENB.TO", "TRP.TO", "PPL.TO", "KEY.TO",
+            "NPI.TO", "FTS.TO", "EMA.TO", "AQN.TO", "TA.TO", "SHOP.TO", "CSU.TO", "GIB.A.TO", "OTEX.TO", "LSPD.TO",
+            "KXS.TO", "DSG.TO", "DCBO.TO", "NVEI.TO", "ATD.TO", "QSR.TO", "DOL.TO", "L.TO", "MRU.TO", "GOOS.TO",
+            "ATZ.TO", "GIL.TO", "TECK.B.TO", "LUN.TO", "HBM.TO", "IVN.TO", "FVI.TO", "PAAS.TO", "ELD.TO", "AGI.TO",
+            "AEM.TO", "FR.TO", "WPM.TO", "CCO.TO", "NXE.TO", "EFR.TO", "BHC.TO", "WELL.TO", "JWEL.TO", "BCE.TO",
+            "T.TO", "RCI.B.TO", "QBR.B.TO", "TRI.TO", "CAR.UN.TO", "REI.UN.TO", "GRT.UN.TO", "SRU.UN.TO", "DIR.UN.TO",
+            "AIF.TO", "CAE.TO", "ATS.TO", "WTE.TO", "BBD.B.TO", "DOO.TO", "MG.TO", "NFI.TO", "STN.TO", "TIH.TO",
+            "RBA.TO", "FNV.TO", "ABX.TO", "NGD.TO", "OR.TO", "SSL.TO", "SAP.TO", "EMP.A.TO", "FCR.UN.TO", "BEI.UN.TO",
+            "CHP.UN.TO", "HR.UN.TO", "AP.UN.TO", "NWH.UN.TO", "PKI.TO", "ATCO.TO", "ACO.X.TO", "CU.TO", "H.TO",
+            "BLDP.TO", "XTC.TO", "MRE.TO", "LIF.TO", "SCL.TO", "SJR.B.TO", "CIX.TO", "POW.TO", "WN.TO", "CPX.TO",
+            "ALA.TO", "GEI.TO", "BIR.TO", "PEY.TO", "ERF.TO", "TVE.TO", "KEL.TO", "AR.TO", "CR.TO", "BTE.TO",
+            "CPG.TO", "NVA.TO", "VII.TO", "BIPC.TO", "BEPC.TO", "NTR.TO", "CF.TO", "HCG.TO", "EQB.TO", "LB.TO",
+            "MKP.TO", "FSZ.TO", "GSY.TO", "PRM.TO", "HPS.A.TO", "BAD.TO", "ARE.TO", "AC.TO", "CJT.TO", "MDA.TO",
+            "MAL.TO", "RCH.TO", "RUS.TO", "WPK.TO", "CAS.TO", "CCL.B.TO", "ITP.TO", "RPI.UN.TO", "YRI.TO", "PBH.TO",
+            "LNF.TO", "BYD.TO", "MTY.TO", "PZA.TO", "AW.UN.TO", "BPF.UN.TO", "KEG.UN.TO", "CRT.UN.TO", "IIP.UN.TO",
+            "MRG.UN.TO", "SOT.UN.TO", "SMU.UN.TO", "TCN.TO", "HOM.UN.TO", "NVU.UN.TO", "GDI.TO", "CJR.B.TO", "BB.TO",
+            "BBTV.TO", "REAL.TO", "CTS.TO", "TCS.TO", "ENGH.TO", "SYZ.TO", "MDF.TO", "QIPT.TO", "PHO.TO", "DND.TO",
+            "ABCL.TO", "CRDL.TO", "ACB.TO", "TLRY.TO", "OGI.TO", "HEXO.TO", "FIRE.TO",
+        ]
+        return fallback
+
+
+@st.cache_data(ttl=60)
+def cached_download(ticker: str, interval: str = "1m", period: str = "1d"):
+    """Cached yfinance download to reduce rate limits."""
+    df = yf.download(ticker, interval=interval, period=period, progress=False)
+    return df
+
+
+# ---------------------------------------------------------
+# SIDEBAR SETTINGS (for backtest)
 # ---------------------------------------------------------
 st.sidebar.header("Strategy Settings")
 
@@ -68,29 +105,56 @@ ALL_STRATEGIES = [
 # ---------------------------------------------------------
 # DATA FUNCTIONS
 # ---------------------------------------------------------
-def get_intraday_data(tickers, interval="1m", period="1d"):
+def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    return df
+
+
+def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retries=3):
     data = {}
-    for t in tickers:
-        try:
-            df = yf.download(t, interval=interval, period=period, progress=False)
-            if not df.empty:
-                df = df.dropna()
-                df = df[~df.index.duplicated(keep="last")]
-                df = df.sort_index()
+
+    def fetch_one(t):
+        for _ in range(retries):
+            try:
+                df = cached_download(t, interval=interval, period=period)
+                if not df.empty:
+                    df = flatten_columns(df)
+                    df = df.dropna()
+                    df = df[~df.index.duplicated(keep="last")]
+                    df = df.sort_index()
+                    # Ensure required columns exist
+                    if {"Close", "Volume"}.issubset(df.columns):
+                        return t, df
+                return t, None
+            except Exception:
+                continue
+        return t, None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_one, t): t for t in tickers}
+        for fut in as_completed(futures):
+            t, df = fut.result()
+            if df is not None:
                 data[t] = df
-        except Exception:
-            continue
+
     return data
 
 
 def compute_vwap(df):
     df = df.copy()
+    df = flatten_columns(df)
+    if not {"Close", "Volume"}.issubset(df.columns):
+        return df
     df["VWAP"] = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
     return df
 
 
 def compute_emas(df):
     df = df.copy()
+    df = flatten_columns(df)
+    if "Close" not in df.columns:
+        return df
     df["EMA_9"] = df["Close"].ewm(span=9, adjust=False).mean()
     df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
     return df
@@ -166,10 +230,12 @@ def apply_strategy_logic(strategy, close, vwap, ema9, ema20, orh, orl, df):
 
 
 # ---------------------------------------------------------
-# PATTERN DETECTION (LIGHT "AI")
+# PATTERN DETECTION
 # ---------------------------------------------------------
 def detect_patterns(df):
     df = compute_vwap(compute_emas(df))
+    if not {"Close", "VWAP", "EMA_9", "EMA_20"}.issubset(df.columns):
+        return []
     last = df.tail(1).iloc[0]
 
     close = float(last["Close"])
@@ -202,6 +268,10 @@ def score_stock(ticker, df):
         return None
 
     df = compute_vwap(compute_emas(df))
+    required = {"Close", "Volume", "VWAP", "EMA_9", "EMA_20"}
+    if not required.issubset(df.columns):
+        return None
+
     last = df.tail(1).iloc[0]
 
     try:
@@ -218,7 +288,6 @@ def score_stock(ticker, df):
     score = 0
     reasons = []
 
-    # Base conditions
     if close > vwap:
         score += 1
         reasons.append("Above VWAP")
@@ -226,7 +295,6 @@ def score_stock(ticker, df):
         score += 1
         reasons.append("EMA9 > EMA20 (uptrend)")
 
-    # Combine all strategies
     for strat in ALL_STRATEGIES:
         strat_score, strat_reasons = apply_strategy_logic(
             strat, close, vwap, ema9, ema20, orh, orl, df
@@ -235,7 +303,6 @@ def score_stock(ticker, df):
         for r in strat_reasons:
             reasons.append(f"{strat}: {r}")
 
-    # Volume spike
     if len(df) > 20:
         avg_vol = float(df["Volume"].tail(20).mean())
         if volume > avg_vol * 1.5:
@@ -272,16 +339,21 @@ def score_stock(ticker, df):
 def get_multi_tf_snapshot(ticker):
     frames = {}
     for interval in ["1m", "5m", "15m"]:
-        df = yf.download(ticker, interval=interval, period="1d", progress=False)
-        if not df.empty:
-            df = compute_emas(df)
-            df = df.dropna()
-            last = df.tail(1).iloc[0]
-            frames[interval] = {
-                "close": float(last["Close"]),
-                "ema9": float(last["EMA_9"]),
-                "ema20": float(last["EMA_20"]),
-            }
+        try:
+            df = yf.download(ticker, interval=interval, period="1d", progress=False)
+            if not df.empty:
+                df = compute_emas(df)
+                df = df.dropna()
+                df = flatten_columns(df)
+                if {"Close", "EMA_9", "EMA_20"}.issubset(df.columns):
+                    last = df.tail(1).iloc[0]
+                    frames[interval] = {
+                        "close": float(last["Close"]),
+                        "ema9": float(last["EMA_9"]),
+                        "ema20": float(last["EMA_20"]),
+                    }
+        except Exception:
+            continue
     return frames
 
 
@@ -289,7 +361,11 @@ def get_multi_tf_snapshot(ticker):
 # BACKTEST ENGINE + CSV EXPORT
 # ---------------------------------------------------------
 def backtest_strategy(ticker, strategy_name, days=5):
-    df = yf.download(ticker, interval="5m", period=f"{days}d", progress=False)
+    try:
+        df = yf.download(ticker, interval="5m", period=f"{days}d", progress=False)
+    except Exception:
+        return None, 0.0
+
     if df.empty:
         return None, 0.0
 
@@ -297,6 +373,10 @@ def backtest_strategy(ticker, strategy_name, days=5):
     df = df.dropna()
     df = df[~df.index.duplicated(keep="last")]
     df = df.sort_index()
+    df = flatten_columns(df)
+
+    if not {"Close", "VWAP", "EMA_9", "EMA_20"}.issubset(df.columns):
+        return None, 0.0
 
     position = 0
     entry = 0.0
@@ -338,7 +418,8 @@ def backtest_strategy(ticker, strategy_name, days=5):
 # ---------------------------------------------------------
 st.title("🇨🇦 TSX Intraday Scanner — All Stocks, Top 10 Across All Strategies")
 
-tickers = ALL_CANADIAN_TICKERS  # scan the whole universe defined above
+all_tickers = fetch_tsx_tickers_live()
+st.write(f"Scanning {len(all_tickers)} Canadian tickers live.")
 
 refresh_interval = st.slider("Auto-refresh interval (seconds)", 30, 300, 60)
 st_autorefresh(interval=refresh_interval * 1000, key="refresh")
@@ -348,11 +429,11 @@ st_autorefresh(interval=refresh_interval * 1000, key="refresh")
 # MAIN SCAN
 # ---------------------------------------------------------
 def run_scan():
-    data = get_intraday_data(tickers)
+    data = get_intraday_data(all_tickers)
 
     st.subheader("Debug: Data Status")
     debug_rows = []
-    for t in tickers:
+    for t in all_tickers:
         if t in data:
             debug_rows.append([t, "OK", len(data[t])])
         else:
@@ -370,25 +451,26 @@ def run_scan():
         st.error("❌ No valid stocks found. This is normal when the market is closed or data is limited.")
         return
 
-    df_scores = pd.DataFrame([
-        {
-            "ticker": r["ticker"],
-            "performance": r["performance"],
-            "score": r["score"],
-            "buy_price": r["buy_price"],
-            "sell_price": r["sell_price"],
-            "vwap": r["vwap"],
-            "ema9": r["ema9"],
-            "ema20": r["ema20"],
-            "orh": r["orh"],
-            "orl": r["orl"],
-        }
-        for r in rows
-    ])
+    df_scores = pd.DataFrame(
+        [
+            {
+                "ticker": r["ticker"],
+                "performance": r["performance"],
+                "score": r["score"],
+                "buy_price": r["buy_price"],
+                "sell_price": r["sell_price"],
+                "vwap": r["vwap"],
+                "ema9": r["ema9"],
+                "ema20": r["ema20"],
+                "orh": r["orh"],
+                "orl": r["orl"],
+            }
+            for r in rows
+        ]
+    )
 
     df_scores = df_scores.sort_values("performance", ascending=False)
 
-    # Only top 10 best to invest (across all strategies)
     top10 = df_scores.head(10)
 
     st.subheader("🏆 Top 10 Canadian Stocks (All Strategies Combined)")
@@ -412,7 +494,6 @@ def run_scan():
 
     st.subheader("Details for Top 10")
 
-    # Only show details for top 10
     top10_tickers = set(top10["ticker"].tolist())
     top_rows = [r for r in rows if r["ticker"] in top10_tickers]
 
@@ -434,26 +515,43 @@ def run_scan():
             st.write("### Live Chart (1m)")
             df_plot = compute_vwap(compute_emas(df))
             fig = go.Figure()
-            fig.add_trace(go.Candlestick(
-                x=df_plot.index,
-                open=df_plot["Open"],
-                high=df_plot["High"],
-                low=df_plot["Low"],
-                close=df_plot["Close"],
-                name="Price",
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_plot.index, y=df_plot["VWAP"],
-                line=dict(color="orange"), name="VWAP"
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_plot.index, y=df_plot["EMA_9"],
-                line=dict(color="blue"), name="EMA 9"
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_plot.index, y=df_plot["EMA_20"],
-                line=dict(color="purple"), name="EMA 20"
-            ))
+            fig.add_trace(
+                go.Candlestick(
+                    x=df_plot.index,
+                    open=df_plot["Open"],
+                    high=df_plot["High"],
+                    low=df_plot["Low"],
+                    close=df_plot["Close"],
+                    name="Price",
+                )
+            )
+            if "VWAP" in df_plot.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_plot.index,
+                        y=df_plot["VWAP"],
+                        line=dict(color="orange"),
+                        name="VWAP",
+                    )
+                )
+            if "EMA_9" in df_plot.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_plot.index,
+                        y=df_plot["EMA_9"],
+                        line=dict(color="blue"),
+                        name="EMA 9",
+                    )
+                )
+            if "EMA_20" in df_plot.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df_plot.index,
+                        y=df_plot["EMA_20"],
+                        line=dict(color="purple"),
+                        name="EMA 20",
+                    )
+                )
             fig.update_layout(height=400, xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
