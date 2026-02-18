@@ -4,13 +4,12 @@ import numpy as np
 import yfinance as yf
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-import plotly.graph_objects as go
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ---------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------
-st.set_page_config(page_title="TSX Intraday Scanner", layout="wide")
+st.set_page_config(page_title="TSX Intraday Scanner — Top 10 All Strategies", layout="wide")
 
 OPENING_RANGE_MINUTES = 15
 
@@ -24,24 +23,19 @@ def fetch_tsx_tickers_live():
     If scraping fails, fall back to a large static list.
     """
     try:
-        # Example: scrape TSX Composite components from a public source
-        # You can replace this URL with a more reliable TSX components source.
         url = "https://en.wikipedia.org/wiki/S%26P/TSX_Composite_Index"
         tables = pd.read_html(url)
         comp = tables[0]
-        # Expect a column with ticker symbols
-        # Wikipedia often lists them without .TO, so we add it.
         tickers = (
             comp.iloc[:, 0]
             .astype(str)
             .str.strip()
-            .str.replace(".", "-", regex=False)  # sometimes dots used differently
+            .str.replace(".", "-", regex=False)
         )
         tickers = [t + ".TO" if not t.endswith(".TO") else t for t in tickers]
         tickers = sorted(list(set(tickers)))
         return tickers
     except Exception:
-        # Fallback: large static universe
         fallback = [
             "RY.TO", "TD.TO", "BNS.TO", "BMO.TO", "CM.TO", "NA.TO", "MFC.TO", "SLF.TO", "GWO.TO", "IFC.TO",
             "BN.TO", "BAM.TO", "FFH.TO", "CP.TO", "CNR.TO", "TFII.TO", "WSP.TO", "WCN.TO", "SU.TO", "CNQ.TO",
@@ -69,7 +63,6 @@ def fetch_tsx_tickers_live():
 
 @st.cache_data(ttl=60)
 def cached_download(ticker: str, interval: str = "1m", period: str = "1d"):
-    """Cached yfinance download to reduce rate limits."""
     df = yf.download(ticker, interval=interval, period=period, progress=False)
     return df
 
@@ -105,12 +98,6 @@ ALL_STRATEGIES = [
 # ---------------------------------------------------------
 # DATA FUNCTIONS
 # ---------------------------------------------------------
-def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-    return df
-
-
 def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retries=3):
     data = {}
 
@@ -118,15 +105,27 @@ def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retri
         for _ in range(retries):
             try:
                 df = cached_download(t, interval=interval, period=period)
-                if not df.empty:
-                    df = flatten_columns(df)
-                    df = df.dropna()
-                    df = df[~df.index.duplicated(keep="last")]
-                    df = df.sort_index()
-                    # Ensure required columns exist
-                    if {"Close", "Volume"}.issubset(df.columns):
-                        return t, df
-                return t, None
+                if df is None or df.empty:
+                    continue
+
+                # HARD FLATTEN: kill multi-index columns immediately
+                try:
+                    df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+                except Exception:
+                    return t, None
+
+                required_cols = {"Open", "High", "Low", "Close", "Volume"}
+                if not required_cols.issubset(df.columns):
+                    continue
+
+                df = df.dropna()
+                df = df[~df.index.duplicated(keep="last")]
+                df = df.sort_index()
+
+                if df.empty:
+                    continue
+
+                return t, df
             except Exception:
                 continue
         return t, None
@@ -143,7 +142,6 @@ def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retri
 
 def compute_vwap(df):
     df = df.copy()
-    df = flatten_columns(df)
     if not {"Close", "Volume"}.issubset(df.columns):
         return df
     df["VWAP"] = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
@@ -152,7 +150,6 @@ def compute_vwap(df):
 
 def compute_emas(df):
     df = df.copy()
-    df = flatten_columns(df)
     if "Close" not in df.columns:
         return df
     df["EMA_9"] = df["Close"].ewm(span=9, adjust=False).mean()
@@ -334,24 +331,29 @@ def score_stock(ticker, df):
 
 
 # ---------------------------------------------------------
-# MULTI‑TIMEFRAME SNAPSHOT
+# MULTI‑TIMEFRAME SNAPSHOT (TEXT ONLY)
 # ---------------------------------------------------------
 def get_multi_tf_snapshot(ticker):
     frames = {}
     for interval in ["1m", "5m", "15m"]:
         try:
             df = yf.download(ticker, interval=interval, period="1d", progress=False)
-            if not df.empty:
-                df = compute_emas(df)
-                df = df.dropna()
-                df = flatten_columns(df)
-                if {"Close", "EMA_9", "EMA_20"}.issubset(df.columns):
-                    last = df.tail(1).iloc[0]
-                    frames[interval] = {
-                        "close": float(last["Close"]),
-                        "ema9": float(last["EMA_9"]),
-                        "ema20": float(last["EMA_20"]),
-                    }
+            if df is None or df.empty:
+                continue
+            try:
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            except Exception:
+                continue
+            df = compute_emas(df)
+            df = df.dropna()
+            if not {"Close", "EMA_9", "EMA_20"}.issubset(df.columns):
+                continue
+            last = df.tail(1).iloc[0]
+            frames[interval] = {
+                "close": float(last["Close"]),
+                "ema9": float(last["EMA_9"]),
+                "ema20": float(last["EMA_20"]),
+            }
         except Exception:
             continue
     return frames
@@ -366,14 +368,18 @@ def backtest_strategy(ticker, strategy_name, days=5):
     except Exception:
         return None, 0.0
 
-    if df.empty:
+    if df is None or df.empty:
+        return None, 0.0
+
+    try:
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    except Exception:
         return None, 0.0
 
     df = compute_vwap(compute_emas(df))
     df = df.dropna()
     df = df[~df.index.duplicated(keep="last")]
     df = df.sort_index()
-    df = flatten_columns(df)
 
     if not {"Close", "VWAP", "EMA_9", "EMA_20"}.issubset(df.columns):
         return None, 0.0
@@ -511,49 +517,6 @@ def run_scan():
             st.write("### Patterns")
             for p in r["patterns"]:
                 st.write(f"- {p}")
-
-            st.write("### Live Chart (1m)")
-            df_plot = compute_vwap(compute_emas(df))
-            fig = go.Figure()
-            fig.add_trace(
-                go.Candlestick(
-                    x=df_plot.index,
-                    open=df_plot["Open"],
-                    high=df_plot["High"],
-                    low=df_plot["Low"],
-                    close=df_plot["Close"],
-                    name="Price",
-                )
-            )
-            if "VWAP" in df_plot.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_plot.index,
-                        y=df_plot["VWAP"],
-                        line=dict(color="orange"),
-                        name="VWAP",
-                    )
-                )
-            if "EMA_9" in df_plot.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_plot.index,
-                        y=df_plot["EMA_9"],
-                        line=dict(color="blue"),
-                        name="EMA 9",
-                    )
-                )
-            if "EMA_20" in df_plot.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_plot.index,
-                        y=df_plot["EMA_20"],
-                        line=dict(color="purple"),
-                        name="EMA 20",
-                    )
-                )
-            fig.update_layout(height=400, xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
 
             st.write("### Multi‑Timeframe Trend (1m / 5m / 15m)")
             mtf = get_multi_tf_snapshot(t)
