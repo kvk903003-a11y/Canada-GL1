@@ -111,9 +111,7 @@ def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retri
                 if df.empty:
                     continue
 
-                # If pre‑market, optionally filter to pre‑open (TSX ~ 09:30 ET)
                 if session_type == "Pre‑Market":
-                    # yfinance index is usually timezone‑aware; keep everything before 09:30 local
                     try:
                         idx = df.index.tz_convert("America/Toronto")
                         df = df[idx.time < dt.time(9, 30)]
@@ -219,20 +217,27 @@ def apply_strategy_logic(strategy, close, vwap, ema9, ema20, orh, orl, df):
     return score, reasons
 
 # ---------------------------------------------------------
-# LIGHT ML SCORING (LINEAR MODEL ON PAST RETURNS)
+# ML SCORING (ROBUST)
 # ---------------------------------------------------------
 def ml_score_from_df(df: pd.DataFrame) -> float:
     df = flatten(df.copy())
-    if "Close" not in df.columns or "Volume" not in df.columns:
+
+    if df is None or len(df) < 50:
+        return 0.0
+    if not {"Close", "Volume"}.issubset(df.columns):
         return 0.0
 
     df["ret"] = df["Close"].pct_change()
     df["future_ret"] = df["ret"].shift(-1)
 
-    df["vol_z"] = (df["Volume"] - df["Volume"].rolling(20).mean()) / (df["Volume"].rolling(20).std() + 1e-9)
+    df["vol_z"] = (df["Volume"] - df["Volume"].rolling(20).mean()) / (
+        df["Volume"].rolling(20).std() + 1e-9
+    )
+
     df = compute_emas(df)
     if not {"EMA_9", "EMA_20"}.issubset(df.columns):
         return 0.0
+
     df["ema_diff"] = df["EMA_9"] - df["EMA_20"]
 
     feat_cols = ["ret", "vol_z", "ema_diff"]
@@ -246,17 +251,31 @@ def ml_score_from_df(df: pd.DataFrame) -> float:
     X = sub[feat_cols].values
     y = sub["future_ret"].values
 
-    X = np.hstack([np.ones((X.shape[0], 1)), X])  # add bias
+    X = np.hstack([np.ones((X.shape[0], 1)), X])
+
     try:
         w, *_ = np.linalg.lstsq(X, y, rcond=None)
     except Exception:
         return 0.0
 
+    if w is None or len(w) != X.shape[1]:
+        return 0.0
+
     last_row = df.iloc[[-2]] if len(df) > 2 else df.tail(1)
     x_last = last_row[feat_cols].values
-    x_last = np.hstack([np.ones((x_last.shape[0], 1)), x_last])
-    pred = float(x_last @ w)
-    return float(np.clip(pred * 100, -5, 5))  # scale to a small range
+    if x_last is None or x_last.shape[1] != len(feat_cols):
+        return 0.0
+
+    x_last = np.hstack([np.ones((1, 1)), x_last])
+    if x_last.shape[1] != len(w):
+        return 0.0
+
+    try:
+        pred = float(x_last @ w)
+    except Exception:
+        return 0.0
+
+    return float(np.clip(pred * 100, -5, 5))
 
 # ---------------------------------------------------------
 # PATTERN DETECTION
@@ -464,7 +483,6 @@ def run_scan():
 
     df_scores = df_scores.sort_values("performance", ascending=False)
 
-    # Sector‑balanced top 10
     max_per_sector = 3
     picked = []
     counts = {}
@@ -508,7 +526,9 @@ def run_scan():
         if r["ticker"] not in top10_tickers:
             continue
 
-        with st.expander(f"{r['ticker']} — Sector {r['sector']} — Score {r['score']} — ML {r['ml_score']:.2f} — Perf {r['performance']:.2f}"):
+        with st.expander(
+            f"{r['ticker']} — Sector {r['sector']} — Score {r['score']} — ML {r['ml_score']:.2f} — Perf {r['performance']:.2f}"
+        ):
             st.write("Buy price:", r["buy_price"])
             st.write("Sell price:", r["sell_price"])
             st.write("VWAP:", r["vwap"])
