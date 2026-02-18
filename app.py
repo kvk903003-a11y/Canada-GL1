@@ -1,14 +1,13 @@
 import datetime as dt
-
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# -----------------------------
+# ---------------------------------------------------------
 # CONFIG
-# -----------------------------
+# ---------------------------------------------------------
 st.set_page_config(page_title="TSX Intraday Scanner", layout="wide")
 
 DEFAULT_TICKERS = [
@@ -18,46 +17,48 @@ DEFAULT_TICKERS = [
 
 OPENING_RANGE_MINUTES = 15
 
-# -----------------------------
-# HELPER FUNCTIONS
-# -----------------------------
+
+# ---------------------------------------------------------
+# DATA FUNCTIONS
+# ---------------------------------------------------------
 def get_intraday_data(tickers, interval="1m", period="1d"):
     data = {}
     for t in tickers:
         try:
             df = yf.download(t, interval=interval, period=period, progress=False)
             if not df.empty:
-                df.dropna(inplace=True)
+                df = df.dropna()
                 data[t] = df
         except Exception:
             continue
     return data
+
 
 def compute_vwap(df):
     df = df.copy()
     df["VWAP"] = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
     return df
 
-def compute_emas(df, spans=(9, 20)):
+
+def compute_emas(df):
     df = df.copy()
-    for span in spans:
-        df[f"EMA_{span}"] = df["Close"].ewm(span=span, adjust=False).mean()
+    df["EMA_9"] = df["Close"].ewm(span=9, adjust=False).mean()
+    df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
     return df
 
-def get_opening_range(df, opening_minutes=15):
-    df_local = df.copy()
-    try:
-        df_local["Time"] = df_local.index.tz_convert("America/Toronto").time
-    except Exception:
-        df_local["Time"] = df_local.index.time
 
-    start_dt = df_local.index[0]
-    end_dt = start_dt + dt.timedelta(minutes=opening_minutes)
-    or_df = df_local[(df_local.index >= start_dt) & (df_local.index < end_dt)]
+def get_opening_range(df):
+    start = df.index[0]
+    end = start + dt.timedelta(minutes=OPENING_RANGE_MINUTES)
+    or_df = df[(df.index >= start) & (df.index < end)]
     if or_df.empty:
         return None, None
     return or_df["High"].max(), or_df["Low"].min()
 
+
+# ---------------------------------------------------------
+# SCORING + BUY/SELL LOGIC
+# ---------------------------------------------------------
 def score_stock(ticker, df):
     if df.empty:
         return None
@@ -66,115 +67,124 @@ def score_stock(ticker, df):
     df = compute_emas(df)
 
     last = df.iloc[-1]
+
+    # Convert all to float scalars
+    close = float(last["Close"])
+    vwap = float(last["VWAP"])
+    ema9 = float(last["EMA_9"])
+    ema20 = float(last["EMA_20"])
+
     orh, orl = get_opening_range(df)
 
     score = 0
     reasons = []
 
     # Above VWAP
-    if last["Close"] > last["VWAP"]:
+    if close > vwap:
         score += 1
-        reasons.append("Above VWAP (bullish bias)")
+        reasons.append("Above VWAP")
 
-    # Trend: EMA 9 > EMA 20
-    if last["EMA_9"] > last["EMA_20"]:
+    # Trend
+    if ema9 > ema20:
         score += 1
-        reasons.append("Short-term uptrend (EMA 9 > EMA 20)")
+        reasons.append("EMA9 > EMA20 (uptrend)")
 
-    # Opening range logic
+    # Opening range breakout
     if orh is not None:
-        if last["Close"] > orh and last["Close"] > last["Open"]:
+        if close > orh:
             score += 2
             reasons.append("Opening range breakout")
-        elif (orh - last["Close"]) / orh < 0.003:
+        elif (orh - close) / orh < 0.003:
             score += 1
-            reasons.append("Near opening range high")
+            reasons.append("Near ORH")
 
     # Volume spike
     if len(df) > 20:
         avg_vol = df["Volume"].tail(20).mean()
-        if last["Volume"] > 1.5 * avg_vol:
+        if last["Volume"] > avg_vol * 1.5:
             score += 1
             reasons.append("Volume spike")
+
+    # BUY PRICE = current price
+    buy_price = close
+
+    # SELL PRICE = simple target (0.3% above)
+    sell_price = round(close * 1.003, 4)
+
+    # PERFORMANCE SCORE = score + momentum factor
+    momentum = (ema9 - ema20)
+    performance = score + momentum
 
     return {
         "ticker": ticker,
         "score": score,
-        "price": float(last["Close"]),
-        "vwap": float(last["VWAP"]),
-        "ema9": float(last["EMA_9"]),
-        "ema20": float(last["EMA_20"]),
-        "orh": float(orh) if orh is not None else None,
-        "orl": float(orl) if orl is not None else None,
+        "performance": float(performance),
+        "buy_price": float(buy_price),
+        "sell_price": float(sell_price),
+        "vwap": vwap,
+        "ema9": ema9,
+        "ema20": ema20,
+        "orh": float(orh) if orh else None,
+        "orl": float(orl) if orl else None,
         "reasons": reasons,
     }
 
-# -----------------------------
+
+# ---------------------------------------------------------
 # STREAMLIT UI
-# -----------------------------
-st.title("🇨🇦 TSX Intraday Scanner (Auto‑Refresh)")
-
-st.markdown(
-    """
-Scans selected **TSX stocks** and ranks them by a simple intraday score based on:
-
-- Opening range breakout
-- VWAP bias
-- Short-term trend (EMA 9 vs EMA 20)
-- Volume spike
-"""
-)
+# ---------------------------------------------------------
+st.title("🇨🇦 TSX Intraday Scanner — Auto Refresh")
 
 tickers_input = st.text_input(
-    "TSX tickers (comma-separated, with .TO suffix):",
+    "TSX tickers (comma-separated):",
     value=", ".join(DEFAULT_TICKERS),
 )
 
 tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
 
 refresh_interval = st.slider("Auto-refresh interval (seconds)", 30, 300, 60)
-
-# True timed auto-refresh
-st_autorefresh(interval=refresh_interval * 1000, key="datarefresh")
+st_autorefresh(interval=refresh_interval * 1000, key="refresh")
 
 if st.button("Refresh now"):
     st.experimental_rerun()
 
-st.info("Leave this tab open; the table will refresh automatically.")
 
+# ---------------------------------------------------------
+# MAIN SCAN
+# ---------------------------------------------------------
 def run_scan():
-    with st.spinner("Fetching data and scanning..."):
+    with st.spinner("Scanning TSX stocks..."):
         data = get_intraday_data(tickers)
         rows = []
+
         for t, df in data.items():
             res = score_stock(t, df)
-            if res is not None:
+            if res:
                 rows.append(res)
 
         if not rows:
-            st.warning("No data available for the selected tickers.")
+            st.warning("No data found.")
             return
 
         df_scores = pd.DataFrame(rows)
-        df_scores.sort_values("score", ascending=False, inplace=True)
 
-        st.subheader("Ranked Intraday Candidates")
+        # Sort by performance
+        df_scores = df_scores.sort_values("performance", ascending=False)
+
+        st.subheader("📊 Ranked Intraday Opportunities")
         st.dataframe(
-            df_scores[["ticker", "score", "price", "vwap", "ema9", "ema20", "orh", "orl"]],
+            df_scores[
+                ["ticker", "performance", "score", "buy_price", "sell_price", "vwap", "ema9", "ema20", "orh", "orl"]
+            ],
             use_container_width=True,
         )
 
         st.subheader("Details")
         for _, row in df_scores.iterrows():
-            with st.expander(f"{row['ticker']} (Score: {row['score']})"):
-                st.write(f"**Price:** {row['price']:.2f}")
-                st.write(f"**VWAP:** {row['vwap']:.2f}")
-                st.write(f"**EMA 9:** {row['ema9']:.2f}")
-                st.write(f"**EMA 20:** {row['ema20']:.2f}")
-                st.write(f"**ORH:** {row['orh']}")
-                st.write(f"**ORL:** {row['orl']}")
+            with st.expander(f"{row['ticker']} — Score {row['score']}"):
                 st.write("**Reasons:**")
                 for r in row["reasons"]:
                     st.write(f"- {r}")
+
 
 run_scan()
