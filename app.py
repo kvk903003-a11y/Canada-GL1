@@ -28,7 +28,6 @@ def get_intraday_data(tickers, interval="1m", period="1d"):
             df = yf.download(t, interval=interval, period=period, progress=False)
             if not df.empty:
                 df = df.dropna()
-                # remove duplicate timestamps just in case
                 df = df[~df.index.duplicated(keep="last")]
                 df = df.sort_index()
                 data[t] = df
@@ -58,9 +57,7 @@ def get_opening_range(df):
     or_df = df[(df.index >= start) & (df.index < end)]
     if or_df.empty:
         return None, None
-    orh = float(or_df["High"].max())
-    orl = float(or_df["Low"].min())
-    return orh, orl
+    return float(or_df["High"].max()), float(or_df["Low"].min())
 
 
 # ---------------------------------------------------------
@@ -73,7 +70,6 @@ def score_stock(ticker, df):
     df = compute_vwap(df)
     df = compute_emas(df)
 
-    # force last row to be a single row
     last = df.tail(1).iloc[0]
 
     try:
@@ -90,17 +86,14 @@ def score_stock(ticker, df):
     score = 0
     reasons = []
 
-    # Above VWAP
     if close > vwap:
         score += 1
         reasons.append("Above VWAP")
 
-    # Trend
     if ema9 > ema20:
         score += 1
         reasons.append("EMA9 > EMA20 (uptrend)")
 
-    # Opening range breakout / near ORH
     if orh is not None:
         if close > orh:
             score += 2
@@ -109,18 +102,14 @@ def score_stock(ticker, df):
             score += 1
             reasons.append("Near ORH")
 
-    # Volume spike
     if len(df) > 20:
         avg_vol = float(df["Volume"].tail(20).mean())
         if volume > avg_vol * 1.5:
             score += 1
             reasons.append("Volume spike")
 
-    # BUY / SELL
     buy_price = close
-    sell_price = round(close * 1.003, 4)  # simple 0.3% target
-
-    # PERFORMANCE = score + momentum
+    sell_price = round(close * 1.003, 4)
     momentum = ema9 - ema20
     performance = score + momentum
 
@@ -156,4 +145,74 @@ st_autorefresh(interval=refresh_interval * 1000, key="refresh")
 
 
 # ---------------------------------------------------------
-# MAIN
+# MAIN SCAN
+# ---------------------------------------------------------
+def run_scan():
+    now = dt.datetime.now(dt.timezone.utc).astimezone(dt.timezone(dt.timedelta(hours=-5)))
+    market_open = now.replace(hour=9, minute=30, second=0)
+    market_close = now.replace(hour=16, minute=0, second=0)
+
+    if not (market_open <= now <= market_close):
+        st.warning("⚠️ TSX market is currently CLOSED. Intraday data will be empty.")
+        st.info("Market hours: 9:30 AM – 4:00 PM Toronto time")
+
+    data = get_intraday_data(tickers)
+
+    st.subheader("Debug: Data Status")
+    debug_rows = []
+    for t in tickers:
+        if t in data:
+            debug_rows.append([t, "OK", len(data[t])])
+        else:
+            debug_rows.append([t, "NO DATA", 0])
+    st.table(pd.DataFrame(debug_rows, columns=["Ticker", "Status", "Rows"]))
+
+    rows = []
+
+    for t, df in data.items():
+        res = score_stock(t, df)
+        if res:
+            rows.append(res)
+        else:
+            st.write(f"⚠️ Skipped {t} — scoring returned None")
+
+    if not rows:
+        st.error("❌ No valid stocks found. This is normal when the market is closed.")
+        return
+
+    df_scores = pd.DataFrame(rows)
+    df_scores = df_scores.sort_values("performance", ascending=False)
+
+    st.subheader("📊 Ranked Intraday Opportunities")
+    st.dataframe(
+        df_scores[
+            [
+                "ticker",
+                "performance",
+                "score",
+                "buy_price",
+                "sell_price",
+                "vwap",
+                "ema9",
+                "ema20",
+                "orh",
+                "orl",
+            ]
+        ],
+        use_container_width=True,
+    )
+
+    st.subheader("Details")
+    for _, row in df_scores.iterrows():
+        with st.expander(f"{row['ticker']} — Score {row['score']}"):
+            st.write("**Buy price:**", row["buy_price"])
+            st.write("**Sell price:**", row["sell_price"])
+            st.write("**VWAP:**", row["vwap"])
+            st.write("**EMA 9 / EMA 20:**", row["ema9"], "/", row["ema20"])
+            st.write("**ORH / ORL:**", row["orh"], "/", row["orl"])
+            st.write("**Reasons:**")
+            for r in row["reasons"]:
+                st.write(f"- {r}")
+
+
+run_scan()
