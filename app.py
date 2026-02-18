@@ -51,9 +51,14 @@ def get_opening_range(df):
     start = df.index[0]
     end = start + dt.timedelta(minutes=OPENING_RANGE_MINUTES)
     or_df = df[(df.index >= start) & (df.index < end)]
+
     if or_df.empty:
         return None, None
-    return or_df["High"].max(), or_df["Low"].min()
+
+    # Force scalar floats
+    orh = float(or_df["High"].max())
+    orl = float(or_df["Low"].min())
+    return orh, orl
 
 
 # ---------------------------------------------------------
@@ -123,8 +128,8 @@ def score_stock(ticker, df):
         "vwap": vwap,
         "ema9": ema9,
         "ema20": ema20,
-        "orh": float(orh) if orh else None,
-        "orl": float(orl) if orl else None,
+        "orh": orh,
+        "orl": orl,
         "reasons": reasons,
     }
 
