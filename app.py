@@ -34,19 +34,18 @@ def get_intraday_data(tickers, interval="1m", period="1d"):
     return data
 
 def compute_vwap(df):
-    q = df["Volume"]
-    p = df["Close"]
-    vwap = (p * q).cumsum() / q.cumsum()
-    return vwap
+    df = df.copy()
+    df["VWAP"] = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
+    return df
 
 def compute_emas(df, spans=(9, 20)):
+    df = df.copy()
     for span in spans:
         df[f"EMA_{span}"] = df["Close"].ewm(span=span, adjust=False).mean()
     return df
 
 def get_opening_range(df, opening_minutes=15):
     df_local = df.copy()
-    # Assume index is timezone-aware; if not, skip tz_convert
     try:
         df_local["Time"] = df_local.index.tz_convert("America/Toronto").time
     except Exception:
@@ -63,8 +62,7 @@ def score_stock(ticker, df):
     if df.empty:
         return None
 
-    df = df.copy()
-    df["VWAP"] = compute_vwap(df)
+    df = compute_vwap(df)
     df = compute_emas(df)
 
     last = df.iloc[-1]
@@ -83,16 +81,16 @@ def score_stock(ticker, df):
         score += 1
         reasons.append("Short-term uptrend (EMA 9 > EMA 20)")
 
-    # Near ORH breakout
+    # Opening range logic
     if orh is not None:
         if last["Close"] > orh and last["Close"] > last["Open"]:
             score += 2
             reasons.append("Opening range breakout")
-        elif (orh - last["Close"]) / orh < 0.003:  # within 0.3%
+        elif (orh - last["Close"]) / orh < 0.003:
             score += 1
             reasons.append("Near opening range high")
 
-    # Volume spike vs last 20 bars
+    # Volume spike
     if len(df) > 20:
         avg_vol = df["Volume"].tail(20).mean()
         if last["Volume"] > 1.5 * avg_vol:
@@ -102,12 +100,12 @@ def score_stock(ticker, df):
     return {
         "ticker": ticker,
         "score": score,
-        "price": last["Close"],
-        "vwap": last["VWAP"],
-        "ema9": last["EMA_9"],
-        "ema20": last["EMA_20"],
-        "orh": orh,
-        "orl": orl,
+        "price": float(last["Close"]),
+        "vwap": float(last["VWAP"]),
+        "ema9": float(last["EMA_9"]),
+        "ema20": float(last["EMA_20"]),
+        "orh": float(orh) if orh is not None else None,
+        "orl": float(orl) if orl is not None else None,
         "reasons": reasons,
     }
 
