@@ -68,7 +68,6 @@ def score_stock(ticker, df):
 
     last = df.iloc[-1]
 
-    # Convert all to float scalars
     close = float(last["Close"])
     vwap = float(last["VWAP"])
     ema9 = float(last["EMA_9"])
@@ -112,7 +111,7 @@ def score_stock(ticker, df):
     sell_price = round(close * 1.003, 4)
 
     # PERFORMANCE SCORE = score + momentum factor
-    momentum = (ema9 - ema20)
+    momentum = ema9 - ema20
     performance = score + momentum
 
     return {
@@ -143,10 +142,9 @@ tickers_input = st.text_input(
 tickers = [t.strip() for t in tickers_input.split(",") if t.strip()]
 
 refresh_interval = st.slider("Auto-refresh interval (seconds)", 30, 300, 60)
-st_autorefresh(interval=refresh_interval * 1000, key="refresh")
 
-if st.button("Refresh now"):
-    st.experimental_rerun()
+# SAFE auto-refresh
+st_autorefresh(interval=refresh_interval * 1000, key="refresh")
 
 
 # ---------------------------------------------------------
