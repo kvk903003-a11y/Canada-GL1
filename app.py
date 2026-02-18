@@ -1,7 +1,7 @@
 import datetime as dt
 import pandas as pd
 import numpy as np
-import yfinance as yf
+import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9,8 +9,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ---------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------
-st.set_page_config(page_title="TSX Intraday Scanner — ML, Sectors, Pre‑Market", layout="wide")
+st.set_page_config(page_title="TSX Intraday Scanner — Polygon, ML, Sectors, Pre‑Market", layout="wide")
 OPENING_RANGE_MINUTES = 15
+
+POLYGON_KEY = "abc123xyz456POLYGONKEY"
+POLYGON_BASE = "https://api.polygon.io"
 
 # ---------------------------------------------------------
 # GLOBAL SAFE HELPERS
@@ -24,14 +27,10 @@ def flatten(df: pd.DataFrame | None) -> pd.DataFrame | None:
 
 
 def safe_close_series(df: pd.DataFrame):
-    """
-    Always return a 1D Series for Close, even if df["Close"] is a DataFrame.
-    """
     if "Close" not in df.columns:
         return None
     s = df["Close"]
     if isinstance(s, pd.DataFrame):
-        # take the first column if multi-column
         s = s.iloc[:, 0]
     return s
 
@@ -49,35 +48,110 @@ def safe_volume_series(df: pd.DataFrame):
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def fetch_tsx_tickers_live():
-    try:
-        url = "https://en.wikipedia.org/wiki/S%26P/TSX_Composite_Index"
-        tables = pd.read_html(url)
-        comp = tables[0]
-        tickers = comp.iloc[:, 0].astype(str).str.strip()
-        tickers = [t + ".TO" if not t.endswith(".TO") else t for t in tickers]
-        return sorted(list(set(tickers)))
-    except Exception:
-        return [
-            "RY.TO","TD.TO","BNS.TO","BMO.TO","CM.TO","NA.TO","MFC.TO","SLF.TO","GWO.TO","IFC.TO",
-            "BN.TO","BAM.TO","FFH.TO","CP.TO","CNR.TO","TFII.TO","WSP.TO","WCN.TO","SU.TO","CNQ.TO",
-            "CVE.TO","TOU.TO","ARX.TO","MEG.TO","WCP.TO","VET.TO","ENB.TO","TRP.TO","PPL.TO","KEY.TO",
-            "NPI.TO","FTS.TO","EMA.TO","AQN.TO","TA.TO","SHOP.TO","CSU.TO","GIB.A.TO","OTEX.TO","LSPD.TO",
-        ]
+    # Polygon TSX tickers: locale=ca, market=stocks
+    url = f"{POLYGON_BASE}/v3/reference/tickers"
+    params = {
+        "market": "stocks",
+        "locale": "ca",
+        "active": "true",
+        "limit": 1000,
+        "apiKey": POLYGON_KEY,
+    }
+    tickers = []
+    while True:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            break
+        data = r.json()
+        results = data.get("results", [])
+        for item in results:
+            sym = item.get("ticker")
+            if sym:
+                tickers.append(sym)
+        next_url = data.get("next_url")
+        if not next_url:
+            break
+        url = next_url
+        params = {"apiKey": POLYGON_KEY}
+    tickers = sorted(list(set(tickers)))
+    return tickers
 
 
 @st.cache_data(ttl=3600)
 def get_sector(ticker: str) -> str:
+    url = f"{POLYGON_BASE}/v3/reference/tickers/{ticker}"
+    params = {"apiKey": POLYGON_KEY}
     try:
-        info = yf.Ticker(ticker).info
-        return info.get("sector", "Unknown")
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return "Unknown"
+        data = r.json()
+        res = data.get("results", {})
+        return res.get("sic_description", "Unknown")
     except Exception:
         return "Unknown"
 
 
 @st.cache_data(ttl=60)
-def cached_download(ticker: str, interval: str = "1m", period: str = "1d", prepost: bool = False):
-    df = yf.download(ticker, interval=interval, period=period, progress=False, prepost=prepost)
-    return flatten(df)
+def polygon_download_1m(ticker: str, prepost: bool = False):
+    """
+    Download today's 1‑minute candles for a TSX ticker from Polygon.
+    """
+    now = dt.datetime.now(dt.timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_str = start.isoformat()
+    end_str = now.isoformat()
+
+    url = f"{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/1/minute/{start_str}/{end_str}"
+    params = {
+        "adjusted": "true",
+        "sort": "asc",
+        "limit": 50000,
+        "apiKey": POLYGON_KEY,
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        results = data.get("results", [])
+        if not results:
+            return None
+
+        df = pd.DataFrame(results)
+        # Polygon fields: t (ms), o, h, l, c, v
+        df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
+        df = df.set_index("timestamp").sort_index()
+        df = df.rename(
+            columns={
+                "o": "Open",
+                "h": "High",
+                "l": "Low",
+                "c": "Close",
+                "v": "Volume",
+            }
+        )
+        df = df[["Open", "High", "Low", "Close", "Volume"]]
+        df = df.dropna()
+        df = df[~df.index.duplicated(keep="last")]
+        df = df.sort_index()
+
+        if df.empty:
+            return None
+
+        # Pre‑market filter: keep before 09:30 America/Toronto
+        if prepost:
+            try:
+                idx = df.index.tz_convert("America/Toronto")
+                df = df[idx.time < dt.time(9, 30)]
+                if df.empty:
+                    return None
+            except Exception:
+                pass
+
+        return df
+    except Exception:
+        return None
 
 # ---------------------------------------------------------
 # SIDEBAR SETTINGS
@@ -115,39 +189,18 @@ ALL_STRATEGIES = [
 # ---------------------------------------------------------
 # DATA FUNCTIONS
 # ---------------------------------------------------------
-def get_intraday_data(tickers, interval="1m", period="1d", max_workers=16, retries=3, prepost=False):
+def get_intraday_data(tickers, max_workers=16, retries=3, prepost=False):
     data = {}
 
     def fetch_one(t):
         for _ in range(retries):
-            try:
-                df = cached_download(t, interval=interval, period=period, prepost=prepost)
-                df = flatten(df)
-                if df is None or df.empty:
-                    continue
-
-                # ensure basic columns exist
-                if not {"Open", "High", "Low", "Close", "Volume"}.issubset(df.columns):
-                    continue
-
-                df = df.dropna()
-                df = df[~df.index.duplicated(keep="last")]
-                df = df.sort_index()
-                if df.empty:
-                    continue
-
-                if session_type == "Pre‑Market":
-                    try:
-                        idx = df.index.tz_convert("America/Toronto")
-                        df = df[idx.time < dt.time(9, 30)]
-                        if df.empty:
-                            continue
-                    except Exception:
-                        pass
-
-                return t, df
-            except Exception:
+            df = polygon_download_1m(t, prepost=prepost)
+            df = flatten(df)
+            if df is None or df.empty:
                 continue
+            if not {"Open", "High", "Low", "Close", "Volume"}.issubset(df.columns):
+                continue
+            return t, df
         return t, None
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -421,11 +474,46 @@ def score_stock(ticker, df):
     }
 
 # ---------------------------------------------------------
-# BACKTEST (NO CHARTS)
+# BACKTEST (USING POLYGON 5‑MIN CANDLES)
 # ---------------------------------------------------------
 def backtest_strategy(ticker, strategy_name, days=5):
+    now = dt.datetime.now(dt.timezone.utc)
+    start = now - dt.timedelta(days=days)
+    start_str = start.isoformat()
+    end_str = now.isoformat()
+
+    url = f"{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/5/minute/{start_str}/{end_str}"
+    params = {
+        "adjusted": "true",
+        "sort": "asc",
+        "limit": 50000,
+        "apiKey": POLYGON_KEY,
+    }
     try:
-        df = yf.download(ticker, interval="5m", period=f"{days}d", progress=False)
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return None, 0.0
+        data = r.json()
+        results = data.get("results", [])
+        if not results:
+            return None, 0.0
+
+        df = pd.DataFrame(results)
+        df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
+        df = df.set_index("timestamp").sort_index()
+        df = df.rename(
+            columns={
+                "o": "Open",
+                "h": "High",
+                "l": "Low",
+                "c": "Close",
+                "v": "Volume",
+            }
+        )
+        df = df[["Open", "High", "Low", "Close", "Volume"]]
+        df = df.dropna()
+        df = df[~df.index.duplicated(keep="last")]
+        df = df.sort_index()
     except Exception:
         return None, 0.0
 
@@ -475,10 +563,10 @@ def backtest_strategy(ticker, strategy_name, days=5):
 # ---------------------------------------------------------
 # STREAMLIT UI
 # ---------------------------------------------------------
-st.title("🇨🇦 TSX Intraday Scanner — ML Scoring, Sector‑Balanced, Pre‑Market")
+st.title("🇨🇦 TSX Intraday Scanner — Polygon Real‑Time, ML, Sector‑Balanced, Pre‑Market")
 
 all_tickers = fetch_tsx_tickers_live()
-st.write(f"Scanning {len(all_tickers)} Canadian tickers live — Session: {session_type}")
+st.write(f"Scanning {len(all_tickers)} Canadian tickers via Polygon — Session: {session_type}")
 
 refresh_interval = st.slider("Auto-refresh interval (seconds)", 30, 300, 60)
 st_autorefresh(interval=refresh_interval * 1000, key="refresh")
@@ -537,7 +625,7 @@ def run_scan():
 
     top10 = pd.DataFrame(picked)
 
-    st.subheader("🏆 Sector‑Balanced Top 10 (All Strategies + ML)")
+    st.subheader("🏆 Sector‑Balanced Top 10 (All Strategies + ML, Polygon Real‑Time)")
     st.dataframe(
         top10[
             [
@@ -578,7 +666,7 @@ def run_scan():
             for reason in r["reasons"]:
                 st.write("-", reason)
 
-            st.write("Backtest (5 days, selected strategy)")
+            st.write("Backtest (5 days, selected strategy, Polygon 5‑min)")
             bt_df, pnl = backtest_strategy(r["ticker"], backtest_strategy_name, days=5)
             if bt_df is not None:
                 st.write(f"Total PnL: {pnl:.2f}")
