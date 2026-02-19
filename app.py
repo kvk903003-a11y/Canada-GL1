@@ -1,684 +1,93 @@
-import datetime as dt
+import streamlit as st
+import requests
 import pandas as pd
 import numpy as np
-import requests
-import streamlit as st
-from streamlit_autorefresh import st_autorefresh
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# ---------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------
-st.set_page_config(page_title="TSX Intraday Scanner — Polygon, ML, Sectors, Pre‑Market", layout="wide")
-OPENING_RANGE_MINUTES = 15
+import concurrent.futures
+from datetime import datetime, timedelta
 
 POLYGON_KEY = "abc123xyz456POLYGONKEY"
-POLYGON_BASE = "https://api.polygon.io"
 
-# ---------------------------------------------------------
-# GLOBAL SAFE HELPERS
-# ---------------------------------------------------------
-def flatten(df: pd.DataFrame | None) -> pd.DataFrame | None:
-    if df is None or df.empty:
-        return df
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-    return df
+st.set_page_config(page_title="TSX + TSXV Scanner", layout="wide")
 
-
-def safe_close_series(df: pd.DataFrame):
-    if "Close" not in df.columns:
-        return None
-    s = df["Close"]
-    if isinstance(s, pd.DataFrame):
-        s = s.iloc[:, 0]
-    return s
-
-
-def safe_volume_series(df: pd.DataFrame):
-    if "Volume" not in df.columns:
-        return None
-    s = df["Volume"]
-    if isinstance(s, pd.DataFrame):
-        s = s.iloc[:, 0]
-    return s
-
-# ---------------------------------------------------------
-# CACHED HELPERS
-# ---------------------------------------------------------
 @st.cache_data(ttl=3600)
-def fetch_tsx_tickers_live():
-    # Polygon TSX tickers: locale=ca, market=stocks
-    url = f"{POLYGON_BASE}/v3/reference/tickers"
+def get_tickers():
+    url = "https://api.polygon.io/v3/reference/tickers"
     params = {
         "market": "stocks",
-        "locale": "ca",
         "active": "true",
         "limit": 1000,
-        "apiKey": POLYGON_KEY,
+        "apiKey": POLYGON_KEY
     }
     tickers = []
     while True:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
+        r = requests.get(url, params=params).json()
+        for t in r.get("results", []):
+            if t.get("primary_exchange") in ["TSE", "TSXV"]:
+                if t.get("type") in ["CS", "UNIT"]:
+                    tickers.append(t["ticker"])
+        if "next_url" in r:
+            url = r["next_url"]
+            params = {"apiKey": POLYGON_KEY}
+        else:
             break
-        data = r.json()
-        results = data.get("results", [])
-        for item in results:
-            sym = item.get("ticker")
-            if sym:
-                tickers.append(sym)
-        next_url = data.get("next_url")
-        if not next_url:
-            break
-        url = next_url
-        params = {"apiKey": POLYGON_KEY}
-    tickers = sorted(list(set(tickers)))
     return tickers
 
-
-@st.cache_data(ttl=3600)
-def get_sector(ticker: str) -> str:
-    url = f"{POLYGON_BASE}/v3/reference/tickers/{ticker}"
-    params = {"apiKey": POLYGON_KEY}
+def get_agg(ticker):
+    end = datetime.utcnow()
+    start = end - timedelta(minutes=30)
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/minute/{int(start.timestamp()*1000)}/{int(end.timestamp()*1000)}"
+    params = {"adjusted": "true", "sort": "asc", "limit": 50000, "apiKey": POLYGON_KEY}
     try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
-            return "Unknown"
-        data = r.json()
-        res = data.get("results", {})
-        return res.get("sic_description", "Unknown")
-    except Exception:
-        return "Unknown"
-
-
-@st.cache_data(ttl=60)
-def polygon_download_1m(ticker: str, prepost: bool = False):
-    """
-    Download today's 1‑minute candles for a TSX ticker from Polygon.
-    """
-    now = dt.datetime.now(dt.timezone.utc)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    start_str = start.isoformat()
-    end_str = now.isoformat()
-
-    url = f"{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/1/minute/{start_str}/{end_str}"
-    params = {
-        "adjusted": "true",
-        "sort": "asc",
-        "limit": 50000,
-        "apiKey": POLYGON_KEY,
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
+        r = requests.get(url, params=params).json()
+        if "results" not in r:
             return None
-        data = r.json()
-        results = data.get("results", [])
-        if not results:
-            return None
-
-        df = pd.DataFrame(results)
-        # Polygon fields: t (ms), o, h, l, c, v
-        df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
-        df = df.set_index("timestamp").sort_index()
-        df = df.rename(
-            columns={
-                "o": "Open",
-                "h": "High",
-                "l": "Low",
-                "c": "Close",
-                "v": "Volume",
-            }
-        )
-        df = df[["Open", "High", "Low", "Close", "Volume"]]
-        df = df.dropna()
-        df = df[~df.index.duplicated(keep="last")]
-        df = df.sort_index()
-
-        if df.empty:
-            return None
-
-        # Pre‑market filter: keep before 09:30 America/Toronto
-        if prepost:
-            try:
-                idx = df.index.tz_convert("America/Toronto")
-                df = df[idx.time < dt.time(9, 30)]
-                if df.empty:
-                    return None
-            except Exception:
-                pass
-
+        df = pd.DataFrame(r["results"])
+        df["t"] = pd.to_datetime(df["t"], unit="ms")
+        df.rename(columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"}, inplace=True)
         return df
-    except Exception:
+    except:
         return None
 
-# ---------------------------------------------------------
-# SIDEBAR SETTINGS
-# ---------------------------------------------------------
-st.sidebar.header("Scanner Settings")
-
-session_type = st.sidebar.selectbox(
-    "Session",
-    ["Regular Hours", "Pre‑Market"],
-)
-
-backtest_strategy_name = st.sidebar.selectbox(
-    "Backtest Strategy",
-    [
-        "Opening Range Breakout",
-        "VWAP Pullback",
-        "Trend Continuation",
-        "Reversal Setup",
-        "All Strategies (Weighted)",
-    ],
-)
-
-risk_reward = st.sidebar.slider("Risk/Reward Target (%)", 1.0, 5.0, 2.0)
-pullback_depth = st.sidebar.slider("VWAP Pullback Depth (%)", 0.1, 2.0, 0.5)
-ema_trend_strength = st.sidebar.slider("Trend Strength (EMA9‑EMA20)", 0.0, 1.0, 0.2)
-
-ALL_STRATEGIES = [
-    "Opening Range Breakout",
-    "VWAP Pullback",
-    "Trend Continuation",
-    "Reversal Setup",
-    "All Strategies (Weighted)",
-]
-
-# ---------------------------------------------------------
-# DATA FUNCTIONS
-# ---------------------------------------------------------
-def get_intraday_data(tickers, max_workers=16, retries=3, prepost=False):
-    data = {}
-
-    def fetch_one(t):
-        for _ in range(retries):
-            df = polygon_download_1m(t, prepost=prepost)
-            df = flatten(df)
-            if df is None or df.empty:
-                continue
-            if not {"Open", "High", "Low", "Close", "Volume"}.issubset(df.columns):
-                continue
-            return t, df
-        return t, None
-
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(fetch_one, t): t for t in tickers}
-        for fut in as_completed(futures):
-            t, df = fut.result()
-            if df is not None:
-                data[t] = df
-
-    return data
-
-
-def compute_emas(df):
-    df = flatten(df.copy())
-    close = safe_close_series(df)
-    if close is None:
-        return df
-    df["EMA_9"] = close.ewm(span=9, adjust=False).mean()
-    df["EMA_20"] = close.ewm(span=20, adjust=False).mean()
+def compute_indicators(df):
+    if df is None or len(df) < 20:
+        return None
+    df["ema9"] = df["close"].ewm(span=9).mean()
+    df["ema20"] = df["close"].ewm(span=20).mean()
+    df["vwap"] = (df["close"] * df["volume"]).cumsum() / df["volume"].cumsum()
     return df
 
+def score(df):
+    latest = df.iloc[-1]
+    s = 0
+    if latest["close"] > latest["ema9"]:
+        s += 1
+    if latest["close"] > latest["ema20"]:
+        s += 1
+    if latest["close"] > latest["vwap"]:
+        s += 1
+    return s
 
-def compute_vwap(df):
-    df = flatten(df.copy())
-    close = safe_close_series(df)
-    vol = safe_volume_series(df)
-    if close is None or vol is None:
-        return df
-    df["VWAP"] = (close * vol).cumsum() / vol.cumsum()
-    return df
-
-
-def get_opening_range(df):
-    if df.empty:
-        return None, None
-    start = df.index[0]
-    end = start + dt.timedelta(minutes=OPENING_RANGE_MINUTES)
-    or_df = df[(df.index >= start) & (df.index < end)]
-    if or_df.empty:
-        return None, None
-    return float(or_df["High"].max()), float(or_df["Low"].min())
-
-# ---------------------------------------------------------
-# STRATEGY LOGIC
-# ---------------------------------------------------------
-def apply_strategy_logic(strategy, close, vwap, ema9, ema20, orh, orl, df):
-    score = 0
-    reasons = []
-
-    if strategy == "Opening Range Breakout":
-        if orh is not None and close > orh:
-            score += 3
-            reasons.append("OR Breakout")
-        if orl is not None and close < orl:
-            score += 3
-            reasons.append("OR Breakdown")
-
-    elif strategy == "VWAP Pullback":
-        if vwap > 0:
-            distance = abs(close - vwap) / vwap * 100
-            if distance <= pullback_depth:
-                score += 2
-                reasons.append("Near VWAP (pullback zone)")
-        if close > vwap:
-            score += 1
-            reasons.append("Above VWAP (bullish bias)")
-
-    elif strategy == "Trend Continuation":
-        if ema9 > ema20 + ema_trend_strength:
-            score += 2
-            reasons.append("Strong EMA trend")
-        if close > ema9:
-            score += 1
-            reasons.append("Price above EMA9")
-
-    elif strategy == "Reversal Setup":
-        last = df.tail(1).iloc[0]
-        body = abs(float(last["Close"] - last["Open"]))
-        range_ = float(last["High"] - last["Low"])
-        if range_ > 0 and body / range_ < 0.3:
-            score += 2
-            reasons.append("Indecision candle (reversal)")
-        if close < vwap:
-            score += 1
-            reasons.append("Below VWAP (oversold)")
-
-    elif strategy == "All Strategies (Weighted)":
-        if orh is not None and close > orh:
-            score += 2
-            reasons.append("OR Breakout (weighted)")
-        if vwap > 0 and abs(close - vwap) / vwap * 100 < pullback_depth:
-            score += 1
-            reasons.append("VWAP pullback (weighted)")
-        if ema9 > ema20:
-            score += 1
-            reasons.append("Trend up (weighted)")
-
-    return score, reasons
-
-# ---------------------------------------------------------
-# ML SCORING (ROBUST)
-# ---------------------------------------------------------
-def ml_score_from_df(df: pd.DataFrame) -> float:
-    df = flatten(df.copy())
-
-    if df is None or len(df) < 50:
-        return 0.0
-    if not {"Close", "Volume"}.issubset(df.columns):
-        return 0.0
-
-    close = safe_close_series(df)
-    vol = safe_volume_series(df)
-    if close is None or vol is None:
-        return 0.0
-
-    df["Close_safe"] = close
-    df["Volume_safe"] = vol
-
-    df["ret"] = df["Close_safe"].pct_change()
-    df["future_ret"] = df["ret"].shift(-1)
-
-    df["vol_z"] = (df["Volume_safe"] - df["Volume_safe"].rolling(20).mean()) / (
-        df["Volume_safe"].rolling(20).std() + 1e-9
-    )
-
-    df = compute_emas(df)
-    if not {"EMA_9", "EMA_20"}.issubset(df.columns):
-        return 0.0
-
-    df["ema_diff"] = df["EMA_9"] - df["EMA_20"]
-
-    feat_cols = ["ret", "vol_z", "ema_diff"]
-    if any(c not in df.columns for c in feat_cols):
-        return 0.0
-
-    sub = df.dropna(subset=feat_cols + ["future_ret"]).copy()
-    if len(sub) < 40:
-        return 0.0
-
-    X = sub[feat_cols].values
-    y = sub["future_ret"].values
-
-    X = np.hstack([np.ones((X.shape[0], 1)), X])
-
-    try:
-        w, *_ = np.linalg.lstsq(X, y, rcond=None)
-    except Exception:
-        return 0.0
-
-    if w is None or len(w) != X.shape[1]:
-        return 0.0
-
-    last_row = df.iloc[[-2]] if len(df) > 2 else df.tail(1)
-    x_last = last_row[feat_cols].values
-    if x_last is None or x_last.shape[1] != len(feat_cols):
-        return 0.0
-
-    x_last = np.hstack([np.ones((1, 1)), x_last])
-    if x_last.shape[1] != len(w):
-        return 0.0
-
-    try:
-        pred = float(x_last @ w)
-    except Exception:
-        return 0.0
-
-    return float(np.clip(pred * 100, -5, 5))
-
-# ---------------------------------------------------------
-# PATTERN DETECTION
-# ---------------------------------------------------------
-def detect_patterns(df):
-    df = compute_vwap(compute_emas(df))
-    if not {"Close", "VWAP", "EMA_9", "EMA_20"}.issubset(df.columns):
-        return []
-    last = df.tail(1).iloc[0]
-
-    close = float(last["Close"])
-    vwap = float(last["VWAP"])
-    ema9 = float(last["EMA_9"])
-    ema20 = float(last["EMA_20"])
-
-    patterns = []
-
-    if ema9 > ema20 and close > vwap:
-        patterns.append("Strong uptrend")
-    elif ema9 < ema20 and close < vwap:
-        patterns.append("Strong downtrend")
-    else:
-        patterns.append("Choppy / mixed trend")
-
-    body = abs(float(last["Close"] - last["Open"]))
-    range_ = float(last["High"] - last["Low"])
-    if range_ > 0 and body / range_ < 0.3:
-        patterns.append("Indecision / possible reversal candle")
-
-    return patterns
-
-# ---------------------------------------------------------
-# SCORING (ALL STRATEGIES + ML)
-# ---------------------------------------------------------
-def score_stock(ticker, df):
-    df = flatten(df)
-    df = compute_vwap(compute_emas(df))
-
-    if not {"Close", "Volume", "VWAP", "EMA_9", "EMA_20"}.issubset(df.columns):
+def process_ticker(ticker):
+    df = get_agg(ticker)
+    df = compute_indicators(df)
+    if df is None:
         return None
+    s = score(df)
+    return {"ticker": ticker, "score": s, "price": df.iloc[-1]["close"]}
 
-    last = df.tail(1).iloc[0]
-
-    try:
-        close = float(last["Close"])
-        vwap = float(last["VWAP"])
-        ema9 = float(last["EMA_9"])
-        ema20 = float(last["EMA_20"])
-        volume = float(last["Volume"])
-    except Exception:
-        return None
-
-    orh, orl = get_opening_range(df)
-
-    score = 0
-    reasons = []
-
-    if close > vwap:
-        score += 1
-        reasons.append("Above VWAP")
-    if ema9 > ema20:
-        score += 1
-        reasons.append("EMA9 > EMA20 (uptrend)")
-
-    for strat in ALL_STRATEGIES:
-        strat_score, strat_reasons = apply_strategy_logic(
-            strat, close, vwap, ema9, ema20, orh, orl, df
-        )
-        score += strat_score
-        reasons.extend([f"{strat}: {r}" for r in strat_reasons])
-
-    if len(df) > 20:
-        avg_vol = float(df["Volume"].tail(20).mean())
-        if volume > avg_vol * 1.5:
-            score += 1
-            reasons.append("Volume spike")
-
-    ml_score = ml_score_from_df(df)
-
-    buy_price = close
-    sell_price = round(close * (1 + (risk_reward / 100)), 4)
-    momentum = ema9 - ema20
-    performance = score + momentum + ml_score
-
-    patterns = detect_patterns(df)
-    sector = get_sector(ticker)
-
-    return {
-        "ticker": ticker,
-        "sector": sector,
-        "score": score,
-        "ml_score": ml_score,
-        "performance": float(performance),
-        "buy_price": float(buy_price),
-        "sell_price": float(sell_price),
-        "vwap": vwap,
-        "ema9": ema9,
-        "ema20": ema20,
-        "orh": orh,
-        "orl": orl,
-        "reasons": reasons,
-        "patterns": patterns,
-        "df": df,
-    }
-
-# ---------------------------------------------------------
-# BACKTEST (USING POLYGON 5‑MIN CANDLES)
-# ---------------------------------------------------------
-def backtest_strategy(ticker, strategy_name, days=5):
-    now = dt.datetime.now(dt.timezone.utc)
-    start = now - dt.timedelta(days=days)
-    start_str = start.isoformat()
-    end_str = now.isoformat()
-
-    url = f"{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/5/minute/{start_str}/{end_str}"
-    params = {
-        "adjusted": "true",
-        "sort": "asc",
-        "limit": 50000,
-        "apiKey": POLYGON_KEY,
-    }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
-            return None, 0.0
-        data = r.json()
-        results = data.get("results", [])
-        if not results:
-            return None, 0.0
-
-        df = pd.DataFrame(results)
-        df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
-        df = df.set_index("timestamp").sort_index()
-        df = df.rename(
-            columns={
-                "o": "Open",
-                "h": "High",
-                "l": "Low",
-                "c": "Close",
-                "v": "Volume",
-            }
-        )
-        df = df[["Open", "High", "Low", "Close", "Volume"]]
-        df = df.dropna()
-        df = df[~df.index.duplicated(keep="last")]
-        df = df.sort_index()
-    except Exception:
-        return None, 0.0
-
-    df = flatten(df)
-    df = compute_vwap(compute_emas(df))
-    if not {"Close", "VWAP", "EMA_9", "EMA_20"}.issubset(df.columns):
-        return None, 0.0
-
-    df = df.dropna()
-    df = df[~df.index.duplicated(keep="last")]
-    df = df.sort_index()
-
-    position = 0
-    entry = 0.0
-    pnl = 0.0
-    trades = []
-
-    for ts, row in df.iterrows():
-        close = float(row["Close"])
-        vwap = float(row["VWAP"])
-        ema9 = float(row["EMA_9"])
-        ema20 = float(row["EMA_20"])
-
-        score, _ = apply_strategy_logic(strategy_name, close, vwap, ema9, ema20, None, None, df)
-
-        if position == 0 and score >= 2:
-            position = 1
-            entry = close
-            trades.append({"timestamp": ts, "action": "BUY", "price": close})
-
-        elif position == 1 and close < ema20:
-            pnl += close - entry
-            trades.append({"timestamp": ts, "action": "SELL", "price": close})
-            position = 0
-            entry = 0.0
-
-    if position == 1:
-        pnl += close - entry
-        trades.append({"timestamp": ts, "action": "SELL_EOD", "price": close})
-
-    if not trades:
-        return None, 0.0
-
-    bt_df = pd.DataFrame(trades)
-    return bt_df, pnl
-
-# ---------------------------------------------------------
-# STREAMLIT UI
-# ---------------------------------------------------------
-st.title("🇨🇦 TSX Intraday Scanner — Polygon Real‑Time, ML, Sector‑Balanced, Pre‑Market")
-
-all_tickers = fetch_tsx_tickers_live()
-st.write(f"Scanning {len(all_tickers)} Canadian tickers via Polygon — Session: {session_type}")
-
-refresh_interval = st.slider("Auto-refresh interval (seconds)", 30, 300, 60)
-st_autorefresh(interval=refresh_interval * 1000, key="refresh")
-
-# ---------------------------------------------------------
-# MAIN SCAN
-# ---------------------------------------------------------
 def run_scan():
-    prepost = session_type == "Pre‑Market"
-    data = get_intraday_data(all_tickers, prepost=prepost)
+    tickers = get_tickers()
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+        for r in ex.map(process_ticker, tickers):
+            if r:
+                results.append(r)
+    df = pd.DataFrame(results)
+    df = df.sort_values("score", ascending=False)
+    return df
 
-    rows = []
-    for t, df in data.items():
-        res = score_stock(t, df)
-        if res:
-            rows.append(res)
+st.title("TSX + TSXV Real‑Time Scanner (Polygon)")
 
-    if not rows:
-        st.error("No valid stocks found (market may be closed or data limited).")
-        return
-
-    df_scores = pd.DataFrame(
-        [
-            {
-                "ticker": r["ticker"],
-                "sector": r["sector"],
-                "performance": r["performance"],
-                "score": r["score"],
-                "ml_score": r["ml_score"],
-                "buy_price": r["buy_price"],
-                "sell_price": r["sell_price"],
-                "vwap": r["vwap"],
-                "ema9": r["ema9"],
-                "ema20": r["ema20"],
-                "orh": r["orh"],
-                "orl": r["orl"],
-            }
-            for r in rows
-        ]
-    )
-
-    df_scores = df_scores.sort_values("performance", ascending=False)
-
-    max_per_sector = 3
-    picked = []
-    counts = {}
-
-    for _, row in df_scores.iterrows():
-        sec = row["sector"]
-        counts.setdefault(sec, 0)
-        if counts[sec] < max_per_sector:
-            picked.append(row)
-            counts[sec] += 1
-        if len(picked) >= 10:
-            break
-
-    top10 = pd.DataFrame(picked)
-
-    st.subheader("🏆 Sector‑Balanced Top 10 (All Strategies + ML, Polygon Real‑Time)")
-    st.dataframe(
-        top10[
-            [
-                "ticker",
-                "sector",
-                "performance",
-                "score",
-                "ml_score",
-                "buy_price",
-                "sell_price",
-                "vwap",
-                "ema9",
-                "ema20",
-                "orh",
-                "orl",
-            ]
-        ],
-        use_container_width=True,
-    )
-
-    st.subheader("Details for Top 10")
-    top10_tickers = set(top10["ticker"].tolist())
-
-    for r in rows:
-        if r["ticker"] not in top10_tickers:
-            continue
-
-        with st.expander(
-            f"{r['ticker']} — Sector {r['sector']} — Score {r['score']} — ML {r['ml_score']:.2f} — Perf {r['performance']:.2f}"
-        ):
-            st.write("Buy price:", r["buy_price"])
-            st.write("Sell price:", r["sell_price"])
-            st.write("VWAP:", r["vwap"])
-            st.write("EMA9 / EMA20:", r["ema9"], "/", r["ema20"])
-            st.write("ORH / ORL:", r["orh"], "/", r["orl"])
-            st.write("Patterns:", ", ".join(r["patterns"]))
-            st.write("Reasons:")
-            for reason in r["reasons"]:
-                st.write("-", reason)
-
-            st.write("Backtest (5 days, selected strategy, Polygon 5‑min)")
-            bt_df, pnl = backtest_strategy(r["ticker"], backtest_strategy_name, days=5)
-            if bt_df is not None:
-                st.write(f"Total PnL: {pnl:.2f}")
-                st.dataframe(bt_df, use_container_width=True)
-                csv = bt_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download Backtest CSV",
-                    data=csv,
-                    file_name=f"{r['ticker']}_backtest_{backtest_strategy_name.replace(' ', '_')}.csv",
-                    mime="text/csv",
-                )
-            else:
-                st.write("No backtest trades generated.")
-
-run_scan()
+if st.button("Run Scan"):
+    df = run_scan()
+    st.dataframe(df)
