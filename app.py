@@ -5,12 +5,12 @@ import numpy as np
 import concurrent.futures
 from datetime import datetime, timedelta
 
-POLYGON_KEY = "YOUR_KEY_HERE"
+POLYGON_KEY = "abc123xyz456POLYGONKEY"
 
-st.set_page_config(page_title="TSX + TSXV Scanner", layout="wide")
+st.set_page_config(page_title="US Stock Scanner", layout="wide")
 
 @st.cache_data(ttl=3600)
-def get_tickers():
+def get_us_tickers():
     url = "https://api.polygon.io/v3/reference/tickers"
     params = {
         "market": "stocks",
@@ -22,10 +22,8 @@ def get_tickers():
     while True:
         r = requests.get(url, params=params).json()
         for t in r.get("results", []):
-            ex = t.get("primary_exchange", "")
-            if ex in ["TORONTO", "TSXVENTURE"]:
-                if t.get("type") in ["CS", "UNIT"]:
-                    tickers.append(t["ticker"])
+            if t.get("type") == "CS":  # common stocks only
+                tickers.append(t["ticker"])
         if "next_url" in r:
             url = r["next_url"]
             params = {"apiKey": POLYGON_KEY}
@@ -33,9 +31,9 @@ def get_tickers():
             break
     return tickers
 
-def get_agg(ticker):
+def get_intraday(ticker):
     end = datetime.utcnow()
-    start = end - timedelta(days=1)
+    start = end - timedelta(hours=6)  # safe window for free tier
     url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/5/minute/{int(start.timestamp()*1000)}/{int(end.timestamp()*1000)}"
     params = {"adjusted": "true", "sort": "asc", "limit": 50000, "apiKey": POLYGON_KEY}
     try:
@@ -69,7 +67,7 @@ def score(df):
     return s
 
 def process_ticker(ticker):
-    df = get_agg(ticker)
+    df = get_intraday(ticker)
     df = compute_indicators(df)
     if df is None:
         return None
@@ -77,7 +75,7 @@ def process_ticker(ticker):
     return {"ticker": ticker, "score": s, "price": df.iloc[-1]["close"]}
 
 def run_scan():
-    tickers = get_tickers()
+    tickers = get_us_tickers()
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
         for r in ex.map(process_ticker, tickers):
@@ -89,11 +87,11 @@ def run_scan():
     df = df.sort_values("score", ascending=False)
     return df
 
-st.title("TSX + TSXV Real‑Time Scanner (Polygon)")
+st.title("US Stock Scanner (Polygon Free Tier)")
 
 if st.button("Run Scan"):
     df = run_scan()
     if df.empty:
-        st.error("No valid stocks found. Market may be closed or data unavailable.")
+        st.error("No valid stocks found. Try during market hours.")
     else:
         st.dataframe(df)
