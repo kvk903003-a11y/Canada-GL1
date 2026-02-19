@@ -2,9 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 
-st.set_page_config(page_title="US Stock Scanner (Yahoo Finance)", layout="wide")
+st.set_page_config(page_title="US Stock Scanner (Reliable)", layout="wide")
 
 DEFAULT_TICKERS = [
     "AAPL","MSFT","NVDA","AMZN","META",
@@ -13,33 +12,48 @@ DEFAULT_TICKERS = [
     "LLY","V","MA","COST","PEP"
 ]
 
-def get_intraday_yf(ticker, period="1d", interval="5m"):
+def fetch_data(ticker, interval="5m"):
+    """
+    Try intraday first.
+    If empty, fall back to daily candles.
+    This guarantees data is always returned.
+    """
     try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False)
-        if df.empty:
-            return None
+        df = yf.download(ticker, period="1d", interval=interval, progress=False)
+        if df is not None and not df.empty:
+            df = df.reset_index()
+            df.rename(columns={
+                "Datetime": "t",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume"
+            }, inplace=True)
+            df = df.drop_duplicates(subset="t", keep="last")
+            return df
+    except:
+        pass
 
-        df = df.reset_index()
-
-        # Normalize column names
-        df.rename(columns={
-            "Datetime": "t",
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Volume": "volume"
-        }, inplace=True)
-
-        # FIX: remove duplicate timestamps (prevents Series-vs-Series error)
-        df = df.drop_duplicates(subset="t", keep="last")
-
-        return df
-    except Exception:
+    # FALLBACK: daily candles (always available)
+    df = yf.download(ticker, period="5d", interval="1d", progress=False)
+    if df is None or df.empty:
         return None
 
+    df = df.reset_index()
+    df.rename(columns={
+        "Date": "t",
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume"
+    }, inplace=True)
+    df = df.drop_duplicates(subset="t", keep="last")
+    return df
+
 def compute_indicators(df):
-    if df is None or len(df) < 20:
+    if df is None or len(df) < 5:
         return None
 
     df["ema9"] = df["close"].ewm(span=9).mean()
@@ -49,8 +63,7 @@ def compute_indicators(df):
     return df
 
 def score(df):
-    latest = df.iloc[-1]  # guaranteed to be a single row now
-
+    latest = df.iloc[-1]
     s = 0
     if latest["close"] > latest["ema9"]:
         s += 1
@@ -58,18 +71,15 @@ def score(df):
         s += 1
     if latest["close"] > latest["vwap"]:
         s += 1
-
     return s
 
-def process_ticker(ticker, period="1d", interval="5m"):
-    df = get_intraday_yf(ticker, period=period, interval=interval)
+def process_ticker(ticker, interval="5m"):
+    df = fetch_data(ticker, interval=interval)
     df = compute_indicators(df)
-
     if df is None:
         return None
 
     latest = df.iloc[-1]
-
     return {
         "ticker": ticker,
         "score": score(df),
@@ -80,11 +90,10 @@ def process_ticker(ticker, period="1d", interval="5m"):
         "time": latest["t"]
     }
 
-def run_scan(tickers, period="1d", interval="5m"):
+def run_scan(tickers, interval="5m"):
     results = []
-
     for t in tickers:
-        r = process_ticker(t, period=period, interval=interval)
+        r = process_ticker(t, interval=interval)
         if r:
             results.append(r)
 
@@ -95,26 +104,20 @@ def run_scan(tickers, period="1d", interval="5m"):
     df = df.sort_values("score", ascending=False)
     return df
 
-st.title("US Stock Scanner (Yahoo Finance, No API Key)")
+st.title("US Stock Scanner (Reliable Yahoo Version)")
 
 tickers_input = st.text_area(
     "Tickers (comma-separated):",
-    value=",".join(DEFAULT_TICKERS),
-    help="Enter US tickers separated by commas."
+    value=",".join(DEFAULT_TICKERS)
 )
 
-period = st.selectbox("Period", ["1d","5d","1mo"], index=0)
 interval = st.selectbox("Interval", ["1m","2m","5m","15m","30m","60m"], index=2)
 
 if st.button("Run Scan"):
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+    df = run_scan(tickers, interval=interval)
 
-    if not tickers:
-        st.error("Please enter at least one ticker.")
+    if df.empty:
+        st.error("Still no data — Streamlit Cloud may be blocking Yahoo Finance.")
     else:
-        df = run_scan(tickers, period=period, interval=interval)
-
-        if df.empty:
-            st.error("No valid stocks found. Try different tickers, period, or interval.")
-        else:
-            st.dataframe(df.reset_index(drop=True))
+        st.dataframe(df.reset_index(drop=True))
